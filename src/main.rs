@@ -14,9 +14,10 @@ use std::io::{self, Write};
 #[command(name = "mocnpub")]
 #[command(about = "Nostr npub マイニングツール 🔑", long_about = None)]
 struct Args {
-    /// マイニングする prefix（16進数文字列）
+    /// マイニングする prefix（npub1 に続く bech32 文字列）
     ///
-    /// 例: "00", "cafe", "dead"
+    /// 例: "abc", "test", "satoshi"
+    /// 完全な npub 例: npub1abc... の "abc" 部分を指定
     #[arg(short, long)]
     prefix: String,
 
@@ -64,14 +65,16 @@ fn main() -> io::Result<()> {
         let (sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
         count += 1;
 
-        let pk_hex = pk.to_string();
-        let pk_x_only = &pk_hex[2..]; // x座標のみ（圧縮形式の先頭2文字を除去）
+        // bech32 形式に変換
+        let npub = pubkey_to_npub(&pk);
+        // "npub1" を除去して、bech32 文字列の部分だけを取り出す
+        let npub_body = &npub[5..]; // "npub1" は5文字
 
-        // prefix マッチング判定
-        if pk_x_only.starts_with(&args.prefix) {
-            // bech32 形式に変換
-            let npub = pubkey_to_npub(&pk);
+        // prefix マッチング判定（npub の bech32 部分で比較）
+        if npub_body.starts_with(&args.prefix) {
             let nsec = seckey_to_nsec(&sk);
+            let pk_hex = pk.to_string();
+            let pk_x_only = &pk_hex[2..]; // x座標のみ（圧縮形式の先頭2文字を除去）
 
             // 結果を整形
             let output_text = format!(
