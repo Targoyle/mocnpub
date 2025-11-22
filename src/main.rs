@@ -6,6 +6,8 @@ use hex;
 use std::fs::File;
 use std::io::{self, Write};
 use std::time::Instant;
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Nostr npub マイニングツール 🔑
 ///
@@ -25,6 +27,10 @@ struct Args {
     /// 結果を出力するファイル（オプション、デフォルトは stdout）
     #[arg(short, long)]
     output: Option<String>,
+
+    /// スレッド数（デフォルト: CPU コア数を自動検出）
+    #[arg(short, long)]
+    threads: Option<usize>,
 }
 
 /// 公開鍵（x座標のみ32バイト）を npub に変換
@@ -56,71 +62,141 @@ fn seckey_to_nsec(seckey: &SecretKey) -> String {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
-    println!("🔥 mocnpub - Nostr npub マイニング 🔥");
-    println!("Prefix: '{}'\n", args.prefix);
+    // スレッド数を決定（引数指定 or CPU コア数）
+    let num_threads = args.threads.unwrap_or_else(num_cpus::get);
 
-    let secp = Secp256k1::new();
-    let mut count = 0;
+    println!("🔥 mocnpub - Nostr npub マイニング 🔥");
+    println!("Prefix: '{}'", args.prefix);
+    println!("Threads: {}\n", num_threads);
+
+    // 全スレッド共有のカウンタとフラグ
+    let total_count = Arc::new(AtomicU64::new(0));
+    let found = Arc::new(AtomicBool::new(false));
     let start = Instant::now();
 
-    loop {
-        let (sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
-        count += 1;
+    // 結果を保存する（Option<(SecretKey, PublicKey, String)>）
+    let result: Arc<std::sync::Mutex<Option<(SecretKey, PublicKey, String)>>> = Arc::new(std::sync::Mutex::new(None));
 
-        // bech32 形式に変換
-        let npub = pubkey_to_npub(&pk);
-        // "npub1" を除去して、bech32 文字列の部分だけを取り出す
-        let npub_body = &npub[5..]; // "npub1" は5文字
+    // スレッドを起動
+    let handles: Vec<_> = (0..num_threads)
+        .map(|_| {
+            let prefix = args.prefix.clone();
+            let total_count = Arc::clone(&total_count);
+            let found = Arc::clone(&found);
+            let result = Arc::clone(&result);
 
-        // prefix マッチング判定（npub の bech32 部分で比較）
-        if npub_body.starts_with(&args.prefix) {
-            let elapsed = start.elapsed();
-            let elapsed_secs = elapsed.as_secs_f64();
-            let keys_per_sec = count as f64 / elapsed_secs;
+            std::thread::spawn(move || {
+                let secp = Secp256k1::new();
+                let mut local_count = 0u64;
 
-            let nsec = seckey_to_nsec(&sk);
-            let pk_hex = pk.to_string();
-            let pk_x_only = &pk_hex[2..]; // x座標のみ（圧縮形式の先頭2文字を除去）
+                loop {
+                    // 他のスレッドが見つけたらループを抜ける
+                    if found.load(Ordering::Relaxed) {
+                        break;
+                    }
 
-            // 結果を整形
-            let output_text = format!(
-                "✅ 見つかりました！（{}回試行）\n\n\
-                 経過時間: {:.2}秒\n\
-                 パフォーマンス: {:.2} keys/sec\n\n\
-                 秘密鍵（hex）: {}\n\
-                 秘密鍵（nsec）: {}\n\
-                 公開鍵（圧縮形式）: {}\n\
-                 公開鍵（x座標のみ）: {}\n\
-                 公開鍵（npub）: {}\n",
-                count,
-                elapsed_secs,
-                keys_per_sec,
-                sk.display_secret(),
-                nsec,
-                pk,
-                pk_x_only,
-                npub
-            );
+                    let (sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
+                    local_count += 1;
 
-            // 出力先に応じて出力
-            if let Some(output_file) = &args.output {
-                // ファイルに出力
-                let mut file = File::create(output_file)?;
-                file.write_all(output_text.as_bytes())?;
-                println!("{}", output_text);
-                println!("結果をファイルに保存しました: {}", output_file);
-            } else {
-                // stdout に出力
-                println!("{}", output_text);
+                    // bech32 形式に変換
+                    let npub = pubkey_to_npub(&pk);
+                    // "npub1" を除去して、bech32 文字列の部分だけを取り出す
+                    let npub_body = &npub[5..]; // "npub1" は5文字
+
+                    // prefix マッチング判定（npub の bech32 部分で比較）
+                    if npub_body.starts_with(&prefix) {
+                        // 見つかったことを通知
+                        found.store(true, Ordering::Relaxed);
+
+                        // 結果を保存
+                        let mut result_lock = result.lock().unwrap();
+                        *result_lock = Some((sk, pk, npub));
+                        break;
+                    }
+
+                    // 定期的に全体カウンタを更新（100回ごと）
+                    if local_count % 100 == 0 {
+                        total_count.fetch_add(100, Ordering::Relaxed);
+                    }
+                }
+
+                // 最後に残りのカウントを加算
+                let remainder = local_count % 100;
+                if remainder > 0 {
+                    total_count.fetch_add(remainder, Ordering::Relaxed);
+                }
+            })
+        })
+        .collect();
+
+    // 進捗表示スレッド
+    let total_count_progress = Arc::clone(&total_count);
+    let found_progress = Arc::clone(&found);
+    let progress_handle = std::thread::spawn(move || {
+        loop {
+            if found_progress.load(Ordering::Relaxed) {
+                break;
             }
-
-            break;
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let count = total_count_progress.load(Ordering::Relaxed);
+            if count > 0 {
+                println!("{}回試行中...", count);
+            }
         }
+    });
 
-        // 進捗表示（100回ごと）
-        if count % 100 == 0 {
-            println!("{}回試行中...", count);
+    // 全スレッドの終了を待つ
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    progress_handle.join().unwrap();
+
+    // 結果を取得
+    let result_lock = result.lock().unwrap();
+    if let Some((sk, pk, npub)) = &*result_lock {
+        let elapsed = start.elapsed();
+        let elapsed_secs = elapsed.as_secs_f64();
+        let count = total_count.load(Ordering::Relaxed);
+        let keys_per_sec = count as f64 / elapsed_secs;
+
+        let nsec = seckey_to_nsec(&sk);
+        let pk_hex = pk.to_string();
+        let pk_x_only = &pk_hex[2..]; // x座標のみ（圧縮形式の先頭2文字を除去）
+
+        // 結果を整形
+        let output_text = format!(
+            "✅ 見つかりました！（{}回試行、{}スレッド）\n\n\
+             経過時間: {:.2}秒\n\
+             パフォーマンス: {:.2} keys/sec\n\n\
+             秘密鍵（hex）: {}\n\
+             秘密鍵（nsec）: {}\n\
+             公開鍵（圧縮形式）: {}\n\
+             公開鍵（x座標のみ）: {}\n\
+             公開鍵（npub）: {}\n",
+            count,
+            num_threads,
+            elapsed_secs,
+            keys_per_sec,
+            sk.display_secret(),
+            nsec,
+            pk,
+            pk_x_only,
+            npub
+        );
+
+        // 出力先に応じて出力
+        if let Some(output_file) = &args.output {
+            // ファイルに出力
+            let mut file = File::create(output_file)?;
+            file.write_all(output_text.as_bytes())?;
+            println!("{}", output_text);
+            println!("結果をファイルに保存しました: {}", output_file);
+        } else {
+            // stdout に出力
+            println!("{}", output_text);
         }
+    } else {
+        println!("見つかりませんでした（予期しないエラー）");
     }
 
     Ok(())
