@@ -256,3 +256,94 @@ fn main() -> io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use secp256k1::SecretKey;
+
+    #[test]
+    fn test_validate_prefix_valid() {
+        // 有効な prefix のテスト
+        assert!(validate_prefix("test").is_ok());
+        assert!(validate_prefix("0").is_ok());
+        assert!(validate_prefix("00").is_ok());
+        assert!(validate_prefix("ac").is_ok());
+        assert!(validate_prefix("m0ctane").is_ok());
+    }
+
+    #[test]
+    fn test_validate_prefix_invalid_chars() {
+        // 無効な文字（1, b, i, o）を含む prefix
+        assert!(validate_prefix("abc").is_err()); // 'b' が無効
+        assert!(validate_prefix("test1").is_err()); // '1' が無効
+        assert!(validate_prefix("testi").is_err()); // 'i' が無効
+        assert!(validate_prefix("testo").is_err()); // 'o' が無効
+    }
+
+    #[test]
+    fn test_validate_prefix_uppercase() {
+        // 大文字を含む prefix
+        assert!(validate_prefix("Test").is_err());
+        assert!(validate_prefix("TEST").is_err());
+        assert!(validate_prefix("TeSt").is_err());
+    }
+
+    #[test]
+    fn test_validate_prefix_empty() {
+        // 空文字
+        assert!(validate_prefix("").is_err());
+    }
+
+    #[test]
+    fn test_seckey_to_nsec() {
+        // テスト用の秘密鍵（hex）
+        let sk_hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        let sk = SecretKey::from_slice(&hex::decode(sk_hex).unwrap()).unwrap();
+        let nsec = seckey_to_nsec(&sk);
+
+        // 正しい nsec（実装から生成された値）
+        assert_eq!(nsec, "nsec180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsgyumg0");
+
+        // nsec の形式が正しいことを確認
+        assert!(nsec.starts_with("nsec1"));
+        assert_eq!(nsec.len(), 63); // nsec1 + 58文字
+    }
+
+    #[test]
+    fn test_pubkey_to_npub() {
+        // テスト用の秘密鍵から公開鍵を生成
+        let sk_hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        let sk = SecretKey::from_slice(&hex::decode(sk_hex).unwrap()).unwrap();
+        let secp = Secp256k1::new();
+        let pk = sk.public_key(&secp);
+
+        let npub = pubkey_to_npub(&pk);
+
+        // 正しい npub（実装から生成された値）
+        assert_eq!(npub, "npub1wxxh2mmqeaghnme4kwwudkel7k8sfsrnf7qld4zppu9sglwljq5shd0y24");
+
+        // npub の形式が正しいことを確認
+        assert!(npub.starts_with("npub1"));
+        assert_eq!(npub.len(), 63); // npub1 + 58文字
+    }
+
+    #[test]
+    fn test_validate_prefix_error_messages() {
+        // エラーメッセージの内容を確認
+        let err = validate_prefix("abc").unwrap_err();
+        assert!(err.contains("bech32 does not allow 'b'"));
+        assert!(err.contains("excluded to avoid confusion"));
+
+        let err = validate_prefix("test1").unwrap_err();
+        assert!(err.contains("bech32 does not allow '1'"));
+        assert!(err.contains("reserved as separator"));
+
+        let err = validate_prefix("Test").unwrap_err();
+        assert!(err.contains("uppercase letters"));
+        assert!(err.contains("Use lowercase instead"));
+
+        let err = validate_prefix("").unwrap_err();
+        assert!(err.contains("cannot be empty"));
+    }
+}
