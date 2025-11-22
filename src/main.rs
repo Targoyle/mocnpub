@@ -3,11 +3,11 @@ use secp256k1::rand;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bech32::{encode, Bech32, Hrp};
 use hex;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::time::Instant;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 
 /// Nostr npub マイニングツール 🔑
 ///
@@ -31,6 +31,10 @@ struct Args {
     /// スレッド数（デフォルト: CPU コア数を自動検出）
     #[arg(short, long)]
     threads: Option<usize>,
+
+    /// 見つける鍵の個数（0 = 無限、デフォルト: 1）
+    #[arg(short, long, default_value = "1")]
+    limit: usize,
 }
 
 /// 公開鍵（x座標のみ32バイト）を npub に変換
@@ -122,31 +126,33 @@ fn main() -> io::Result<()> {
 
     println!("🔥 mocnpub - Nostr npub マイニング 🔥");
     println!("Prefix: '{}'", args.prefix);
-    println!("Threads: {}\n", num_threads);
+    println!("Threads: {}", num_threads);
+    println!("Limit: {}\n", if args.limit == 0 { "無限".to_string() } else { args.limit.to_string() });
 
-    // 全スレッド共有のカウンタとフラグ
+    // 全スレッド共有のカウンタ
     let total_count = Arc::new(AtomicU64::new(0));
-    let found = Arc::new(AtomicBool::new(false));
+    let found_count = Arc::new(AtomicUsize::new(0));
     let start = Instant::now();
 
-    // 結果を保存する（Option<(SecretKey, PublicKey, String)>）
-    let result: Arc<std::sync::Mutex<Option<(SecretKey, PublicKey, String)>>> = Arc::new(std::sync::Mutex::new(None));
+    // channel を作成（ワーカースレッド → メインスレッド）
+    let (sender, receiver) = mpsc::channel::<(SecretKey, PublicKey, String, u64)>();
 
     // スレッドを起動
     let handles: Vec<_> = (0..num_threads)
         .map(|_| {
             let prefix = args.prefix.clone();
             let total_count = Arc::clone(&total_count);
-            let found = Arc::clone(&found);
-            let result = Arc::clone(&result);
+            let found_count = Arc::clone(&found_count);
+            let sender = sender.clone();
+            let limit = args.limit;
 
             std::thread::spawn(move || {
                 let secp = Secp256k1::new();
                 let mut local_count = 0u64;
 
                 loop {
-                    // 他のスレッドが見つけたらループを抜ける
-                    if found.load(Ordering::Relaxed) {
+                    // limit 個見つかったらループを抜ける（0 = 無限の場合は抜けない）
+                    if limit > 0 && found_count.load(Ordering::Relaxed) >= limit {
                         break;
                     }
 
@@ -160,13 +166,22 @@ fn main() -> io::Result<()> {
 
                     // prefix マッチング判定（npub の bech32 部分で比較）
                     if npub_body.starts_with(&prefix) {
-                        // 見つかったことを通知
-                        found.store(true, Ordering::Relaxed);
+                        // 見つかった個数をインクリメント
+                        let count = found_count.fetch_add(1, Ordering::Relaxed) + 1;
 
-                        // 結果を保存
-                        let mut result_lock = result.lock().unwrap();
-                        *result_lock = Some((sk, pk, npub));
-                        break;
+                        // 現在の試行回数を取得
+                        let current_total = total_count.load(Ordering::Relaxed) + local_count;
+
+                        // 結果を channel 経由で送信
+                        if sender.send((sk, pk, npub, current_total)).is_err() {
+                            // メインスレッドが終了している場合
+                            break;
+                        }
+
+                        // limit 個見つかったらループを抜ける（0 = 無限の場合は抜けない）
+                        if limit > 0 && count >= limit {
+                            break;
+                        }
                     }
 
                     // 定期的に全体カウンタを更新（100回ごと）
@@ -184,35 +199,45 @@ fn main() -> io::Result<()> {
         })
         .collect();
 
+    // sender を drop（全ワーカースレッドが終了したら receiver が None を返すようにする）
+    drop(sender);
+
     // 進捗表示スレッド
     let total_count_progress = Arc::clone(&total_count);
-    let found_progress = Arc::clone(&found);
+    let found_count_progress = Arc::clone(&found_count);
+    let limit_progress = args.limit;
     let progress_handle = std::thread::spawn(move || {
         loop {
-            if found_progress.load(Ordering::Relaxed) {
+            // limit 個見つかったら終了（0 = 無限の場合は終了しない）
+            if limit_progress > 0 && found_count_progress.load(Ordering::Relaxed) >= limit_progress {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_secs(1));
             let count = total_count_progress.load(Ordering::Relaxed);
+            let found = found_count_progress.load(Ordering::Relaxed);
             if count > 0 {
-                println!("{}回試行中...", count);
+                println!("{}回試行中... (見つかった: {}個)", count, found);
             }
         }
     });
 
-    // 全スレッドの終了を待つ
-    for handle in handles {
-        handle.join().unwrap();
-    }
-    progress_handle.join().unwrap();
+    // ファイル出力の準備（append モード）
+    let mut output_file = if let Some(ref output_path) = args.output {
+        Some(OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(output_path)?)
+    } else {
+        None
+    };
 
-    // 結果を取得
-    let result_lock = result.lock().unwrap();
-    if let Some((sk, pk, npub)) = &*result_lock {
+    // メインスレッドで結果を受信・出力
+    let mut result_count = 0;
+    while let Ok((sk, pk, npub, current_total)) = receiver.recv() {
+        result_count += 1;
         let elapsed = start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
-        let count = total_count.load(Ordering::Relaxed);
-        let keys_per_sec = count as f64 / elapsed_secs;
+        let keys_per_sec = current_total as f64 / elapsed_secs;
 
         let nsec = seckey_to_nsec(&sk);
         let pk_hex = pk.to_string();
@@ -220,15 +245,17 @@ fn main() -> io::Result<()> {
 
         // 結果を整形
         let output_text = format!(
-            "✅ 見つかりました！（{}回試行、{}スレッド）\n\n\
+            "✅ {}個目が見つかりました！（{}回試行、{}スレッド）\n\n\
              経過時間: {:.2}秒\n\
              パフォーマンス: {:.2} keys/sec\n\n\
              秘密鍵（hex）: {}\n\
              秘密鍵（nsec）: {}\n\
              公開鍵（圧縮形式）: {}\n\
              公開鍵（x座標のみ）: {}\n\
-             公開鍵（npub）: {}\n",
-            count,
+             公開鍵（npub）: {}\n\
+{}\n",
+            result_count,
+            current_total,
             num_threads,
             elapsed_secs,
             keys_per_sec,
@@ -236,22 +263,37 @@ fn main() -> io::Result<()> {
             nsec,
             pk,
             pk_x_only,
-            npub
+            npub,
+            "=".repeat(80)
         );
 
         // 出力先に応じて出力
-        if let Some(output_file) = &args.output {
-            // ファイルに出力
-            let mut file = File::create(output_file)?;
+        if let Some(ref mut file) = output_file {
+            // ファイルに append
             file.write_all(output_text.as_bytes())?;
-            println!("{}", output_text);
-            println!("結果をファイルに保存しました: {}", output_file);
-        } else {
-            // stdout に出力
-            println!("{}", output_text);
+            file.flush()?;
         }
-    } else {
-        println!("見つかりませんでした（予期しないエラー）");
+        // stdout にも出力（ファイル出力の有無に関わらず）
+        print!("{}", output_text);
+        io::stdout().flush()?;
+    }
+
+    // 全スレッドの終了を待つ
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    progress_handle.join().unwrap();
+
+    // 最終結果を表示
+    let final_count = total_count.load(Ordering::Relaxed);
+    let elapsed = start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+    println!("\n🎉 マイニング完了！");
+    println!("見つかった鍵: {}個", result_count);
+    println!("総試行回数: {}回", final_count);
+    println!("経過時間: {:.2}秒", elapsed_secs);
+    if let Some(ref output_path) = args.output {
+        println!("結果をファイルに保存しました: {}", output_path);
     }
 
     Ok(())
