@@ -233,21 +233,113 @@
 
 **目的**：CPU 版のロジックを GPU に移植し、爆速マイニングを実現
 
-### タスク (0/7)
+### タスク (4/9)
 
-- [ ] CPU 版のロジックを分析（GPU 化できる部分を特定）
-- [ ] secp256k1 の GPU 実装を調査（rana の実装を参考に）
-- [ ] GPU カーネルで鍵生成を実装（大量並列化）
-- [ ] メモリ転送を最適化（バッチ処理）
-- [ ] prefix マッチング判定を GPU で実装
-- [ ] パフォーマンス比較（CPU vs GPU、何倍速くなったか）
+**Phase 1: 調査・設計**（2025-11-23）
+- [x] CPU 版のロジックを分析（GPU 化できる部分を特定）
+- [x] 参考実装の調査（VanitySearch, CudaBrainSecp, cuECC）
+- [x] ライセンス問題の確認と独自実装の方針決定
+- [x] Q&A セッションでアルゴリズム理解を深める
+
+**Phase 2: 実装**
+- [ ] 最小限の GPU カーネルを実装（鍵生成のみ、GTable なし）
+- [ ] メモリ転送を実装（pinned memory、バッチ処理）
+- [ ] CPU で npub 変換と prefix マッチング判定
+
+**Phase 3: 検証・最適化**
+- [ ] パフォーマンス比較（CPU vs GPU）
 - [ ] 最終テスト（実際に prefix がマッチする nsec を見つける）
 
+### 完了内容
+
+#### Phase 1: 調査・設計（2025-11-23 18:35〜19:30）
+
+**1. CPU 版のロジックを分析** ✅
+- ボトルネック：secp256k1 の鍵生成（93%）
+- Phase 1 戦略：GPU で鍵生成のみ、CPU で bech32 と prefix マッチング
+
+**2. 参考実装の調査** ✅
+- **VanitySearch**（Bitcoin バニティアドレス生成、GPL v3）：
+  - GitHub: https://github.com/JeanLucPons/VanitySearch
+  - パフォーマンス：7,000 Mkeys/sec 以上 🔥
+  - GPUEngine.cu、GPUCompute.h、GPUMath.h を調査
+  - エンドモルフィズム（β, β²）で 6倍高速化
+  - pinned memory、非同期メモリ転送
+  - グループ化された逆元計算（_ModInvGrouped）
+- **CudaBrainSecp**（Brain wallet、GPL v3）：
+  - VanitySearch の GPUMath.h を流用
+  - Pre-computed GTable 戦略（64MB、~20x speedup）
+  - ~2M keys/sec on RTX 3060
+- **cuECC**（教育目的、ライセンス不明）：
+  - 生産利用不可、参考程度
+
+**3. ライセンス問題と独自実装の方針** ✅
+- **問題**：VanitySearch と CudaBrainSecp は GPL v3
+  - コードを直接コピーすると mocnpub も GPL になる 🚨
+- **解決策**：アルゴリズムを理解して独自実装
+  - アルゴリズム自体は著作権の対象外 ✅
+  - libsecp256k1（MIT）も参考にする
+- **方針**：GTable なしのシンプル実装
+  - メモリアクセスのボトルネック回避
+  - GPU の計算能力を活かす（8960 コア）
+  - 実装が簡単、GPL を完全に避ける
+
+**4. Q&A セッション Part 1 でアルゴリズム理解を深める** ✅（2025-11-23 20:31〜21:59）
+- **エンドモルフィズム（β, β²）**：
+  - secp256k1 の特殊な性質（p ≡ 1 (mod 3), j-不変量 = 0）
+  - 1回の鍵生成で 6つの公開鍵をチェック（P, β*P, β²*P, -P, -β*P, -β²*P）
+  - X座標に β を掛けるだけで λ·n·G が得られる（重い演算をスキップ）
+  - 6倍の高速化 🔥
+- **Pinned Memory**：
+  - 物理 RAM に固定される（ページング不可）
+  - DMA 転送で 2〜3倍速い（通常は2段階コピー、pinned は1段階）
+  - cudaHostAllocWriteCombined で書き込み最適化
+  - cudaHostAllocMapped で Zero-Copy（GPU が CPU メモリに直接アクセス）
+- **Jacobian Coordinates**：
+  - 射影座標系の一形態（x = X/Z², y = Y/Z³）
+  - 除算を遅延させる（最後に1回だけ）
+  - 点加算・2倍算で除算なし（Affine の 1/20 のコスト）
+  - secp256k1 は a = 0 で更に簡単（M = 3·X²）
+  - 無限遠点を自然に表現（Z = 0、分岐なし）
+- **射影座標の本質**：
+  - 次元を増やして計算を遅延
+  - 3D グラフィックス、分数計算、mod 演算にも共通する発想
+  - 同じ点を無数に表現（(X, Y, Z) = (λ²X, λ³Y, λZ)）
+
+**5. Q&A セッション Part 2 でアルゴリズム理解を深める** ✅（2025-11-23 22:10〜22:32）
+- **Grouped Modular Inverse**（Montgomery の Trick）：
+  - N個の逆元を、1回の逆元計算 + (3N-3)回の乗算で求める
+  - 256個の逆元：通常は 130万クロック → Montgomery で 6千クロック
+  - **約 200倍の高速化** 🔥
+  - Phase 1 では不要（各スレッドが独立、逆元 1回だけ）
+  - Phase 2 以降で検討（連続した点加算を行う場合）
+- **Asynchronous Memory Transfer**（非同期メモリ転送）：
+  - cudaMemcpyAsync で GPU ↔ CPU の転送を非同期化
+  - cudaEventQuery + 1ms sleep で CPU 負荷削減
+  - スピン待ち（CPU 100%）→ スリープ待ち（CPU 数%）
+  - 転送中も CPU は他の処理を続けられる
+  - **GPU と CPU が並列に動く** 🚀
+  - mocnpub では：GPU が鍵生成中、CPU で bech32 変換と prefix マッチング
+
+### 学んだこと
+
+**VanitySearch のアーキテクチャ**：
+1. **256-bit 演算**：PTX インラインアセンブリで超高速化
+2. **エンドモルフィズム**：1回の鍵生成で 6個の公開鍵をチェック
+3. **Pinned Memory**：DMA で GPU 転送を 2〜3倍高速化
+4. **非同期メモリ転送**：CPU 負荷を下げる
+5. **グループ化された逆元計算**：バッチで効率化
+
+**npub マイニングへの応用**：
+- VanitySearch は Bitcoin（Base58）、mocnpub は Nostr（bech32）
+- 基本的なアルゴリズムは同じ（secp256k1 の点演算）
+- GPU で鍵生成、CPU で bech32 + prefix マッチング
+
 ### 備考
-- rana は CPU 版のマイニングツール（GPU 版ではない）
-- GPU 実装は独自に学びながら実装する
-- メモリ転送がボトルネックになる可能性があるので注意
-- カーネル最適化（共有メモリ、レジスタ使用量）は後回しでOK
+- VanitySearch の GPL v3 に注意（コード直接コピー NG）
+- 独自実装で MIT/Apache 2.0 ライセンスを維持
+- GTable なしでもエンドモルフィズムで高速化可能
+- 次回セッション：質問タイム + 独自実装の設計
 
 ---
 
