@@ -19,7 +19,8 @@ use std::sync::{mpsc, Arc};
 struct Args {
     /// マイニングする prefix（npub1 に続く bech32 文字列）
     ///
-    /// 例: "abc", "test", "satoshi"
+    /// 単一 prefix: "abc", "test", "satoshi"
+    /// 複数 prefix（OR 指定）: "m0ctane0,m0ctane2,m0ctane3"（カンマ区切り）
     /// 完全な npub 例: npub1abc... の "abc" 部分を指定
     #[arg(short, long)]
     prefix: String,
@@ -115,17 +116,29 @@ fn validate_prefix(prefix: &str) -> Result<(), String> {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
-    // prefix の妥当性を検証
-    if let Err(err_msg) = validate_prefix(&args.prefix) {
-        eprintln!("❌ Error: {}", err_msg);
-        std::process::exit(1);
+    // prefix をカンマ区切りで split して Vec に変換
+    let prefixes: Vec<String> = args.prefix
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    // 各 prefix の妥当性を検証
+    for prefix in &prefixes {
+        if let Err(err_msg) = validate_prefix(prefix) {
+            eprintln!("❌ Error: {}", err_msg);
+            std::process::exit(1);
+        }
     }
 
     // スレッド数を決定（引数指定 or CPU コア数）
     let num_threads = args.threads.unwrap_or_else(num_cpus::get);
 
     println!("🔥 mocnpub - Nostr npub マイニング 🔥");
-    println!("Prefix: '{}'", args.prefix);
+    if prefixes.len() == 1 {
+        println!("Prefix: '{}'", prefixes[0]);
+    } else {
+        println!("Prefixes (OR): {}", prefixes.join(", "));
+    }
     println!("Threads: {}", num_threads);
     println!("Limit: {}\n", if args.limit == 0 { "無限".to_string() } else { args.limit.to_string() });
 
@@ -134,13 +147,17 @@ fn main() -> io::Result<()> {
     let found_count = Arc::new(AtomicUsize::new(0));
     let start = Instant::now();
 
+    // prefixes を Arc で共有
+    let prefixes = Arc::new(prefixes);
+
     // channel を作成（ワーカースレッド → メインスレッド）
-    let (sender, receiver) = mpsc::channel::<(SecretKey, PublicKey, String, u64)>();
+    // (SecretKey, PublicKey, npub, matched_prefix, 試行回数)
+    let (sender, receiver) = mpsc::channel::<(SecretKey, PublicKey, String, String, u64)>();
 
     // スレッドを起動
     let handles: Vec<_> = (0..num_threads)
         .map(|_| {
-            let prefix = args.prefix.clone();
+            let prefixes = Arc::clone(&prefixes);
             let total_count = Arc::clone(&total_count);
             let found_count = Arc::clone(&found_count);
             let sender = sender.clone();
@@ -164,16 +181,16 @@ fn main() -> io::Result<()> {
                     // "npub1" を除去して、bech32 文字列の部分だけを取り出す
                     let npub_body = &npub[5..]; // "npub1" は5文字
 
-                    // prefix マッチング判定（npub の bech32 部分で比較）
-                    if npub_body.starts_with(&prefix) {
+                    // 複数 prefix のマッチング判定（どれか1つにマッチすれば OK）
+                    if let Some(matched_prefix) = prefixes.iter().find(|p| npub_body.starts_with(p.as_str())) {
                         // 見つかった個数をインクリメント
                         let count = found_count.fetch_add(1, Ordering::Relaxed) + 1;
 
                         // 現在の試行回数を取得
                         let current_total = total_count.load(Ordering::Relaxed) + local_count;
 
-                        // 結果を channel 経由で送信
-                        if sender.send((sk, pk, npub, current_total)).is_err() {
+                        // 結果を channel 経由で送信（matched_prefix も含める）
+                        if sender.send((sk, pk, npub.clone(), matched_prefix.clone(), current_total)).is_err() {
                             // メインスレッドが終了している場合
                             break;
                         }
@@ -233,7 +250,7 @@ fn main() -> io::Result<()> {
 
     // メインスレッドで結果を受信・出力
     let mut result_count = 0;
-    while let Ok((sk, pk, npub, current_total)) = receiver.recv() {
+    while let Ok((sk, pk, npub, matched_prefix, current_total)) = receiver.recv() {
         result_count += 1;
         let elapsed = start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
@@ -245,7 +262,8 @@ fn main() -> io::Result<()> {
 
         // 結果を整形
         let output_text = format!(
-            "✅ {}個目が見つかりました！（{}回試行、{}スレッド）\n\n\
+            "✅ {}個目が見つかりました！（{}回試行、{}スレッド）\n\
+             マッチした prefix: '{}'\n\n\
              経過時間: {:.2}秒\n\
              パフォーマンス: {:.2} keys/sec\n\n\
              秘密鍵（hex）: {}\n\
@@ -257,6 +275,7 @@ fn main() -> io::Result<()> {
             result_count,
             current_total,
             num_threads,
+            matched_prefix,
             elapsed_secs,
             keys_per_sec,
             sk.display_secret(),
