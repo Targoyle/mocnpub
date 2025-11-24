@@ -188,32 +188,6 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
     }
     mult977[4] = carry;
 
-    // Debug: Print intermediate values for Step 7 case or Step 254^2 case
-    bool is_step7_case = (in[7] == 4611686018427387904ULL) &&
-                         (in[0] == 0 && in[1] == 0 && in[2] == 0 && in[3] == 0 &&
-                          in[4] == 0 && in[5] == 0 && in[6] == 0);
-    bool is_step254_squared_case = (in[0] == 4611688114371666496ULL && in[1] == 0 && in[2] == 0 && in[3] == 0 &&
-                                     in[4] == 18446744071562067480ULL && in[5] == 18446744073709551615ULL &&
-                                     in[6] == 18446744073709551615ULL && in[7] == 4611686018427387903ULL);
-
-    if (is_step7_case) {
-        printf("DEBUG _Reduce512: Step 7 case\n");
-        printf("  high = [%llu, %llu, %llu, %llu]\n", high[0], high[1], high[2], high[3]);
-        printf("  shifted = [%llu, %llu, %llu, %llu, %llu]\n",
-               shifted[0], shifted[1], shifted[2], shifted[3], shifted[4]);
-        printf("  mult977 = [%llu, %llu, %llu, %llu, %llu]\n",
-               mult977[0], mult977[1], mult977[2], mult977[3], mult977[4]);
-    }
-
-    if (is_step254_squared_case) {
-        printf("DEBUG _Reduce512: Step 254^2 case\n");
-        printf("  high = [%llu, %llu, %llu, %llu]\n", high[0], high[1], high[2], high[3]);
-        printf("  shifted = [%llu, %llu, %llu, %llu, %llu]\n",
-               shifted[0], shifted[1], shifted[2], shifted[3], shifted[4]);
-        printf("  mult977 = [%llu, %llu, %llu, %llu, %llu]\n",
-               mult977[0], mult977[1], mult977[2], mult977[3], mult977[4]);
-    }
-
     // Add: shifted + mult977
     uint64_t sum[5] = {0};
     carry = 0;
@@ -227,16 +201,6 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
 
         sum[i] = s2;
         carry = carry1 | carry2;
-    }
-
-    if (is_step7_case) {
-        printf("  sum = [%llu, %llu, %llu, %llu, %llu]\n",
-               sum[0], sum[1], sum[2], sum[3], sum[4]);
-    }
-
-    if (is_step254_squared_case) {
-        printf("  sum = [%llu, %llu, %llu, %llu, %llu]\n",
-               sum[0], sum[1], sum[2], sum[3], sum[4]);
     }
 
     // Reduce sum[4]: sum[4] * 2^256 mod p = sum[4] * (2^32 + 977)
@@ -290,16 +254,6 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
         sum[4] = carry2;
     }
 
-    if (is_step7_case) {
-        printf("  sum (after reducing sum[4]) = [%llu, %llu, %llu, %llu, %llu]\n",
-               sum[0], sum[1], sum[2], sum[3], sum[4]);
-    }
-
-    if (is_step254_squared_case) {
-        printf("  sum (after reducing sum[4]) = [%llu, %llu, %llu, %llu, %llu]\n",
-               sum[0], sum[1], sum[2], sum[3], sum[4]);
-    }
-
     // Add to low
     uint64_t temp[5];
     temp[0] = low[0];
@@ -321,16 +275,6 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
         carry = carry1 | carry2;
     }
 
-    if (is_step7_case) {
-        printf("  temp (before reduction) = [%llu, %llu, %llu, %llu, %llu]\n",
-               temp[0], temp[1], temp[2], temp[3], temp[4]);
-    }
-
-    if (is_step254_squared_case) {
-        printf("  temp (before reduction) = [%llu, %llu, %llu, %llu, %llu]\n",
-               temp[0], temp[1], temp[2], temp[3], temp[4]);
-    }
-
     // Now reduce: while temp >= p, subtract p
     // At most 2-3 iterations needed
     for (int iter = 0; iter < 3; iter++) {
@@ -341,14 +285,6 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
         } else {
             // Compare temp[0..3] with p
             ge = _Compare256(temp, _P) >= 0;
-        }
-
-        if (is_step7_case) {
-            printf("  iter %d: temp[4]=%llu, ge=%d\n", iter, temp[4], ge);
-        }
-
-        if (is_step254_squared_case) {
-            printf("  iter %d: temp[4]=%llu, ge=%d\n", iter, temp[4], ge);
         }
 
         if (ge) {
@@ -367,16 +303,6 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
             }
             // Subtract borrow from temp[4]
             temp[4] -= borrow;
-
-            if (is_step7_case) {
-                printf("  iter %d: after subtraction = [%llu, %llu, %llu, %llu, %llu]\n",
-                       iter, temp[0], temp[1], temp[2], temp[3], temp[4]);
-            }
-
-            if (is_step254_squared_case) {
-                printf("  iter %d: after subtraction = [%llu, %llu, %llu, %llu, %llu]\n",
-                       iter, temp[0], temp[1], temp[2], temp[3], temp[4]);
-            }
         } else {
             break;
         }
@@ -416,39 +342,8 @@ __device__ void _ModMult(const uint64_t a[4], const uint64_t b[4], uint64_t resu
         temp[i + 4] += carry;
     }
 
-    // Debug: Print 512-bit intermediate result if it's a special value (Step 7 squared or Step 254 squared)
-    bool is_step7_squared = (a[0] == 0 && a[1] == 0 && a[2] == 0 && a[3] == 9223372036854775808ULL &&
-                             b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 9223372036854775808ULL);
-    bool is_step254_squared = (a[0] == 18446744071562067480ULL && a[1] == 18446744073709551615ULL &&
-                               a[2] == 18446744073709551615ULL && a[3] == 9223372036854775807ULL &&
-                               b[0] == 18446744071562067480ULL && b[1] == 18446744073709551615ULL &&
-                               b[2] == 18446744073709551615ULL && b[3] == 9223372036854775807ULL);
-
-    if (is_step7_squared) {
-        printf("DEBUG _ModMult: Step 7 squared\n");
-        printf("  temp (512-bit) = [%llu, %llu, %llu, %llu, %llu, %llu, %llu, %llu]\n",
-               temp[0], temp[1], temp[2], temp[3], temp[4], temp[5], temp[6], temp[7]);
-    }
-
-    if (is_step254_squared) {
-        printf("DEBUG _ModMult: Step 254 squared\n");
-        printf("  temp (512-bit) = [%llu, %llu, %llu, %llu, %llu, %llu, %llu, %llu]\n",
-               temp[0], temp[1], temp[2], temp[3], temp[4], temp[5], temp[6], temp[7]);
-    }
-
     // Reduce modulo p
     _Reduce512(temp, result);
-
-    // Debug: Print result after reduction
-    if (is_step7_squared) {
-        printf("  result (256-bit) = [%llu, %llu, %llu, %llu]\n",
-               result[0], result[1], result[2], result[3]);
-    }
-
-    if (is_step254_squared) {
-        printf("  result (256-bit) = [%llu, %llu, %llu, %llu]\n",
-               result[0], result[1], result[2], result[3]);
-    }
 }
 
 /**
@@ -497,10 +392,6 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
                     for (int k = 0; k < 4; k++) {
                         res[k] = a[k];
                     }
-                    if (step < 20 || (step >= 20 && step <= 50)) {
-                        printf("Step %d: First 1 bit found, res = [%llu, %llu, %llu, %llu]\n",
-                               step, res[0], res[1], res[2], res[3]);
-                    }
                     step++;
                 }
             } else {
@@ -511,12 +402,6 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
                     res[k] = temp[k];
                 }
 
-                // Debug: Print intermediate value after squaring (for Step 31 and 255)
-                if (step == 31 || step == 255) {
-                    printf("Step %d: After squaring = [%llu, %llu, %llu, %llu]\n",
-                           step, res[0], res[1], res[2], res[3]);
-                }
-
                 // If bit is set, multiply by a
                 if (bit == 1) {
                     _ModMult(res, a, temp);
@@ -525,16 +410,6 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
                     }
                 }
 
-                // Debug: Print intermediate value after multiplying by a (for Step 31 and 255)
-                if ((step == 31 || step == 255) && bit == 1) {
-                    printf("Step %d: After multiply by a = [%llu, %llu, %llu, %llu]\n",
-                           step, res[0], res[1], res[2], res[3]);
-                }
-
-                if (step < 20 || step >= 250) {
-                    printf("Step %d: bit=%llu, res = [%llu, %llu, %llu, %llu]\n",
-                           step, bit, res[0], res[1], res[2], res[3]);
-                }
                 step++;
             }
         }
