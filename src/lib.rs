@@ -2,6 +2,9 @@ use secp256k1::{PublicKey, SecretKey};
 use bech32::{encode, Bech32, Hrp};
 use hex;
 
+// GPU module
+pub mod gpu;
+
 /// 公開鍵（x座標のみ32バイト）を npub に変換
 pub fn pubkey_to_npub(pubkey: &PublicKey) -> String {
     // 公開鍵の hex 文字列を取得（圧縮形式）
