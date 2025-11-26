@@ -291,6 +291,73 @@ pub fn test_point_double_gpu(
     Ok((result_x, result_y))
 }
 
+/// Test point multiplication on GPU
+///
+/// This function tests the _PointMult function by computing k * P
+/// Input: scalar k (256-bit), point P in Affine coordinates (x, y)
+/// Output: k*P in Affine coordinates (x, y)
+pub fn test_point_mult_gpu(
+    ctx: &Arc<CudaContext>,
+    k: &[u64; 4],
+    px: &[u64; 4],
+    py: &[u64; 4],
+) -> Result<([u64; 4], [u64; 4]), Box<dyn std::error::Error>> {
+    // Get default stream
+    let stream = ctx.default_stream();
+
+    // Load PTX module
+    let ptx_code = include_str!("../cuda/secp256k1.ptx");
+    let module = ctx.load_module(Ptx::from_src(ptx_code))?;
+    let kernel = module.load_function("test_point_mult")?;
+
+    // Prepare input data
+    let input_k: Vec<u64> = k.to_vec();
+    let input_px: Vec<u64> = px.to_vec();
+    let input_py: Vec<u64> = py.to_vec();
+
+    // Allocate device memory
+    let mut k_dev = stream.alloc_zeros::<u64>(4)?;
+    let mut px_dev = stream.alloc_zeros::<u64>(4)?;
+    let mut py_dev = stream.alloc_zeros::<u64>(4)?;
+    let mut output_x_dev = stream.alloc_zeros::<u64>(4)?;
+    let mut output_y_dev = stream.alloc_zeros::<u64>(4)?;
+
+    // Copy input data to device
+    stream.memcpy_htod(&input_k, &mut k_dev)?;
+    stream.memcpy_htod(&input_px, &mut px_dev)?;
+    stream.memcpy_htod(&input_py, &mut py_dev)?;
+
+    // Launch configuration: 1 block, 1 thread (for single test)
+    let config = LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (1, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    // Launch kernel
+    let mut builder = stream.launch_builder(&kernel);
+    builder.arg(&mut k_dev);
+    builder.arg(&mut px_dev);
+    builder.arg(&mut py_dev);
+    builder.arg(&mut output_x_dev);
+    builder.arg(&mut output_y_dev);
+    unsafe {
+        builder.launch(config)?;
+    }
+
+    // Copy result back to host
+    let result_x_vec = stream.memcpy_dtov(&output_x_dev)?;
+    let result_y_vec = stream.memcpy_dtov(&output_y_dev)?;
+
+    // Convert to fixed-size arrays
+    let mut result_x = [0u64; 4];
+    let mut result_y = [0u64; 4];
+    result_x.copy_from_slice(&result_x_vec);
+    result_y.copy_from_slice(&result_y_vec);
+
+    Ok((result_x, result_y))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,6 +775,152 @@ mod tests {
 
         // Check result
         assert_eq!(result_vec, expected, "(2 * p) mod p should equal 0");
+    }
+
+    #[test]
+    fn test_gpu_point_mult_2g() {
+        // Initialize GPU
+        let ctx = init_gpu().expect("Failed to initialize GPU");
+
+        // Test case: 2 * G (should match test_point_double result)
+        // G = (Gx, Gy)
+        let Gx = [
+            0x59F2815B16F81798u64,
+            0x029BFCDB2DCE28D9u64,
+            0x55A06295CE870B07u64,
+            0x79BE667EF9DCBBACu64,
+        ];
+        let Gy = [
+            0x9C47D08FFB10D4B8u64,
+            0xFD17B448A6855419u64,
+            0x5DA4FBFC0E1108A8u64,
+            0x483ADA7726A3C465u64,
+        ];
+
+        // k = 2
+        let k = [2u64, 0, 0, 0];
+
+        let (result_x, result_y) = test_point_mult_gpu(&ctx, &k, &Gx, &Gy)
+            .expect("GPU point multiplication failed");
+
+        // Expected: 2G (same as test_point_double)
+        let expected_2Gx = [
+            0xABAC09B95C709EE5u64,
+            0x5C778E4B8CEF3CA7u64,
+            0x3045406E95C07CD8u64,
+            0xC6047F9441ED7D6Du64,
+        ];
+        let expected_2Gy = [
+            0x236431A950CFE52Au64,
+            0xF7F632653266D0E1u64,
+            0xA3C58419466CEAEEu64,
+            0x1AE168FEA63DC339u64,
+        ];
+
+        println!("2G (via PointMult):");
+        println!("  x = {:?}", result_x);
+        println!("  y = {:?}", result_y);
+
+        assert_eq!(result_x, expected_2Gx, "2G x-coordinate mismatch");
+        assert_eq!(result_y, expected_2Gy, "2G y-coordinate mismatch");
+    }
+
+    #[test]
+    fn test_gpu_point_mult_3g() {
+        // Initialize GPU
+        let ctx = init_gpu().expect("Failed to initialize GPU");
+
+        // Test case: 3 * G
+        let Gx = [
+            0x59F2815B16F81798u64,
+            0x029BFCDB2DCE28D9u64,
+            0x55A06295CE870B07u64,
+            0x79BE667EF9DCBBACu64,
+        ];
+        let Gy = [
+            0x9C47D08FFB10D4B8u64,
+            0xFD17B448A6855419u64,
+            0x5DA4FBFC0E1108A8u64,
+            0x483ADA7726A3C465u64,
+        ];
+
+        // k = 3
+        let k = [3u64, 0, 0, 0];
+
+        let (result_x, result_y) = test_point_mult_gpu(&ctx, &k, &Gx, &Gy)
+            .expect("GPU point multiplication failed");
+
+        // Expected: 3G
+        // 3Gx = 0xF9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9
+        let expected_3Gx = [
+            0x8601F113BCE036F9u64,
+            0xB531C845836F99B0u64,
+            0x49344F85F89D5229u64,
+            0xF9308A019258C310u64,
+        ];
+        // 3Gy = 0x388F7B0F632DE8140FE337E62A37F3566500A99934C2231B6CB9FD7584B8E672
+        let expected_3Gy = [
+            0x6CB9FD7584B8E672u64,
+            0x6500A99934C2231Bu64,
+            0x0FE337E62A37F356u64,
+            0x388F7B0F632DE814u64,
+        ];
+
+        println!("3G (via PointMult):");
+        println!("  x = {:?}", result_x);
+        println!("  y = {:?}", result_y);
+
+        assert_eq!(result_x, expected_3Gx, "3G x-coordinate mismatch");
+        assert_eq!(result_y, expected_3Gy, "3G y-coordinate mismatch");
+    }
+
+    #[test]
+    fn test_gpu_point_mult_7g() {
+        // Initialize GPU
+        let ctx = init_gpu().expect("Failed to initialize GPU");
+
+        // Test case: 7 * G (binary: 111, tests multiple additions)
+        let Gx = [
+            0x59F2815B16F81798u64,
+            0x029BFCDB2DCE28D9u64,
+            0x55A06295CE870B07u64,
+            0x79BE667EF9DCBBACu64,
+        ];
+        let Gy = [
+            0x9C47D08FFB10D4B8u64,
+            0xFD17B448A6855419u64,
+            0x5DA4FBFC0E1108A8u64,
+            0x483ADA7726A3C465u64,
+        ];
+
+        // k = 7
+        let k = [7u64, 0, 0, 0];
+
+        let (result_x, result_y) = test_point_mult_gpu(&ctx, &k, &Gx, &Gy)
+            .expect("GPU point multiplication failed");
+
+        // Expected: 7G
+        // 7Gx = 0x5CBDF0646E5DB4EAA398F365F2EA7A0E3D419B7E0330E39CE92BDDEDCAC4F9BC
+        let expected_7Gx = [
+            0xE92BDDEDCAC4F9BCu64,
+            0x3D419B7E0330E39Cu64,
+            0xA398F365F2EA7A0Eu64,
+            0x5CBDF0646E5DB4EAu64,
+        ];
+        // 7Gy = 0x6AEBCA40BA255960A3178D6D861A54DBA813D0B813FDE7B5A5082628087264DA
+        let expected_7Gy = [
+            0xA5082628087264DAu64,
+            0xA813D0B813FDE7B5u64,
+            0xA3178D6D861A54DBu64,
+            0x6AEBCA40BA255960u64,
+        ];
+
+        println!("7G (via PointMult):");
+        println!("  x = {:?}", result_x);
+        println!("  y = {:?}", result_y);
+
+        assert_eq!(result_x, expected_7Gx, "7G x-coordinate mismatch");
+        assert_eq!(result_y, expected_7Gy, "7G y-coordinate mismatch");
     }
 
     #[test]
