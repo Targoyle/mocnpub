@@ -673,6 +673,55 @@ __device__ void _PointMult(
 }
 
 // ============================================================================
+// Production Kernels
+// ============================================================================
+
+/**
+ * Batch public key generation kernel
+ *
+ * Generates public keys from private keys in parallel.
+ * Each thread processes one private key: pubkey = privkey * G
+ *
+ * Input:
+ *   - privkeys: array of 256-bit private keys [batch_size * 4]
+ *   - batch_size: number of keys to generate
+ *
+ * Output:
+ *   - pubkeys_x: array of x-coordinates of public keys [batch_size * 4]
+ *     (only x-coordinate is needed for npub generation)
+ */
+extern "C" __global__ void generate_pubkeys(
+    const uint64_t* privkeys,   // [batch_size * 4] private keys
+    uint64_t* pubkeys_x,        // [batch_size * 4] public key x-coordinates
+    uint32_t batch_size
+)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Bounds check
+    if (idx >= batch_size) return;
+
+    // Load private key for this thread
+    uint64_t k[4];
+    for (int i = 0; i < 4; i++) {
+        k[i] = privkeys[idx * 4 + i];
+    }
+
+    // Compute public key: P = k * G
+    uint64_t Rx[4], Ry[4], Rz[4];
+    _PointMult(k, _Gx, _Gy, Rx, Ry, Rz);
+
+    // Convert to Affine coordinates (only need x-coordinate for npub)
+    uint64_t x[4], y[4];
+    _JacobianToAffine(Rx, Ry, Rz, x, y);
+
+    // Store x-coordinate
+    for (int i = 0; i < 4; i++) {
+        pubkeys_x[idx * 4 + i] = x[i];
+    }
+}
+
+// ============================================================================
 // Test Kernels
 // ============================================================================
 
