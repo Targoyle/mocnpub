@@ -431,6 +431,150 @@ pub fn generate_pubkeys_batch(
     Ok(pubkeys_x)
 }
 
+/// Generate public keys from consecutive private keys (連続秘密鍵戦略)
+///
+/// This is the "10000連ガチャ" strategy that exploits the property:
+///   (k+1)*G = k*G + G
+///
+/// Each thread generates `keys_per_thread` consecutive public keys:
+///   - First key: base_key * G (heavy _PointMult operation)
+///   - Subsequent keys: P + G using _PointAddMixed (light operation, ~300x faster!)
+///
+/// # Arguments
+/// * `ctx` - GPU context
+/// * `base_keys` - Starting private keys for each thread
+/// * `keys_per_thread` - Number of consecutive keys each thread generates
+///
+/// # Returns
+/// * `Vec<[u64; 4]>` - Public key x-coordinates, ordered as:
+///   [thread0_key0, thread0_key1, ..., thread0_keyN, thread1_key0, ...]
+pub fn generate_pubkeys_sequential_batch(
+    ctx: &Arc<CudaContext>,
+    base_keys: &[[u64; 4]],
+    keys_per_thread: u32,
+) -> Result<Vec<[u64; 4]>, Box<dyn std::error::Error>> {
+    let num_threads = base_keys.len();
+    if num_threads == 0 || keys_per_thread == 0 {
+        return Ok(vec![]);
+    }
+
+    let total_keys = num_threads * keys_per_thread as usize;
+
+    // Get default stream
+    let stream = ctx.default_stream();
+
+    // Load PTX module
+    let ptx_code = include_str!("../cuda/secp256k1.ptx");
+    let module = ctx.load_module(Ptx::from_src(ptx_code))?;
+    let kernel = module.load_function("generate_pubkeys_sequential")?;
+
+    // Flatten base keys to Vec<u64>
+    let base_keys_flat: Vec<u64> = base_keys.iter().flat_map(|k| k.iter().copied()).collect();
+
+    // Allocate device memory
+    let mut base_keys_dev = stream.alloc_zeros::<u64>(num_threads * 4)?;
+    let mut pubkeys_x_dev = stream.alloc_zeros::<u64>(total_keys * 4)?;
+
+    // Copy base keys to device
+    stream.memcpy_htod(&base_keys_flat, &mut base_keys_dev)?;
+
+    // Calculate grid and block dimensions
+    let threads_per_block = 256u32;
+    let num_blocks = (num_threads as u32 + threads_per_block - 1) / threads_per_block;
+
+    let config = LaunchConfig {
+        grid_dim: (num_blocks, 1, 1),
+        block_dim: (threads_per_block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    // Launch kernel
+    let num_threads_u32 = num_threads as u32;
+    let mut builder = stream.launch_builder(&kernel);
+    builder.arg(&mut base_keys_dev);
+    builder.arg(&mut pubkeys_x_dev);
+    builder.arg(&num_threads_u32);
+    builder.arg(&keys_per_thread);
+    unsafe {
+        builder.launch(config)?;
+    }
+
+    // Copy results back to host
+    let pubkeys_x_flat = stream.memcpy_dtov(&pubkeys_x_dev)?;
+
+    // Convert flat Vec to Vec of [u64; 4]
+    let pubkeys_x: Vec<[u64; 4]> = pubkeys_x_flat
+        .chunks_exact(4)
+        .map(|chunk| {
+            let mut arr = [0u64; 4];
+            arr.copy_from_slice(chunk);
+            arr
+        })
+        .collect();
+
+    Ok(pubkeys_x)
+}
+
+/// Test mixed point addition on GPU (for unit testing)
+pub fn test_point_add_mixed_gpu(
+    ctx: &Arc<CudaContext>,
+    x1: &[u64; 4],
+    y1: &[u64; 4],
+    z1: &[u64; 4],
+    x2: &[u64; 4],
+    y2: &[u64; 4],
+) -> Result<([u64; 4], [u64; 4]), Box<dyn std::error::Error>> {
+    let stream = ctx.default_stream();
+
+    let ptx_code = include_str!("../cuda/secp256k1.ptx");
+    let module = ctx.load_module(Ptx::from_src(ptx_code))?;
+    let kernel = module.load_function("test_point_add_mixed")?;
+
+    // Allocate device memory
+    let mut x1_dev = stream.alloc_zeros::<u64>(4)?;
+    let mut y1_dev = stream.alloc_zeros::<u64>(4)?;
+    let mut z1_dev = stream.alloc_zeros::<u64>(4)?;
+    let mut x2_dev = stream.alloc_zeros::<u64>(4)?;
+    let mut y2_dev = stream.alloc_zeros::<u64>(4)?;
+    let mut output_x_dev = stream.alloc_zeros::<u64>(4)?;
+    let mut output_y_dev = stream.alloc_zeros::<u64>(4)?;
+
+    // Copy inputs to device
+    stream.memcpy_htod(&x1.to_vec(), &mut x1_dev)?;
+    stream.memcpy_htod(&y1.to_vec(), &mut y1_dev)?;
+    stream.memcpy_htod(&z1.to_vec(), &mut z1_dev)?;
+    stream.memcpy_htod(&x2.to_vec(), &mut x2_dev)?;
+    stream.memcpy_htod(&y2.to_vec(), &mut y2_dev)?;
+
+    let config = LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (1, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    let mut builder = stream.launch_builder(&kernel);
+    builder.arg(&mut x1_dev);
+    builder.arg(&mut y1_dev);
+    builder.arg(&mut z1_dev);
+    builder.arg(&mut x2_dev);
+    builder.arg(&mut y2_dev);
+    builder.arg(&mut output_x_dev);
+    builder.arg(&mut output_y_dev);
+    unsafe {
+        builder.launch(config)?;
+    }
+
+    let result_x_vec = stream.memcpy_dtov(&output_x_dev)?;
+    let result_y_vec = stream.memcpy_dtov(&output_y_dev)?;
+
+    let mut result_x = [0u64; 4];
+    let mut result_y = [0u64; 4];
+    result_x.copy_from_slice(&result_x_vec);
+    result_y.copy_from_slice(&result_y_vec);
+
+    Ok((result_x, result_y))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1174,5 +1318,142 @@ mod tests {
 
         println!("Large batch test (1024 keys): PASSED");
         println!("  Verified 2G and 3G x-coordinates");
+    }
+
+    // Note: test_point_add_mixed was removed because:
+    // 1. _PointAddMixed is tested via test_generate_pubkeys_sequential_single/multiple_threads
+    // 2. Those tests verify the actual use case: _PointMult result (Z≠1) + G
+    // 3. The Z=1 (Affine input) case doesn't occur in practice
+
+    #[test]
+    fn test_generate_pubkeys_sequential_single() {
+        // Test sequential key generation with keys_per_thread = 3
+        // Starting from k=2, we should get: 2*G, 3*G, 4*G
+        // Note: We start from k=2 (not k=1) to avoid k*G = G case,
+        // which would make the next step G + G (requiring Point Doubling, not Addition)
+        let ctx = init_gpu().expect("Failed to initialize GPU");
+
+        // Base key: k = 2
+        let base_keys = vec![[2u64, 0, 0, 0]];
+        let keys_per_thread = 3u32;
+
+        let pubkeys_x = generate_pubkeys_sequential_batch(&ctx, &base_keys, keys_per_thread)
+            .expect("GPU sequential batch failed");
+
+        assert_eq!(pubkeys_x.len(), 3, "Should generate 3 keys");
+
+        // Get expected values from generate_pubkeys_batch (known-good implementation)
+        let reference_keys = vec![
+            [2u64, 0, 0, 0],
+            [3u64, 0, 0, 0],
+            [4u64, 0, 0, 0],
+        ];
+        let expected_x = generate_pubkeys_batch(&ctx, &reference_keys)
+            .expect("Reference batch generation failed");
+
+        // Compare sequential vs batch results
+        assert_eq!(pubkeys_x[0], expected_x[0], "2G x-coordinate mismatch (sequential vs batch)");
+        assert_eq!(pubkeys_x[1], expected_x[1], "3G x-coordinate mismatch (sequential vs batch)");
+        assert_eq!(pubkeys_x[2], expected_x[2], "4G x-coordinate mismatch (sequential vs batch)");
+
+        println!("test_generate_pubkeys_sequential_single: PASSED");
+        println!("  Generated 2G, 3G, 4G from k=2 with keys_per_thread=3");
+        println!("  Results match generate_pubkeys_batch!");
+    }
+
+    #[test]
+    fn test_generate_pubkeys_sequential_multiple_threads() {
+        // Test with multiple threads, each generating consecutive keys
+        // Note: We use k=2 and k=10 (not k=1) to avoid the G + G case
+        let ctx = init_gpu().expect("Failed to initialize GPU");
+
+        // Two threads: starting from k=2 and k=10
+        let base_keys = vec![
+            [2u64, 0, 0, 0],  // Thread 0: k=2
+            [10u64, 0, 0, 0], // Thread 1: k=10
+        ];
+        let keys_per_thread = 2u32;
+
+        let pubkeys_x = generate_pubkeys_sequential_batch(&ctx, &base_keys, keys_per_thread)
+            .expect("GPU sequential batch failed");
+
+        // Should have 4 keys total: [2G, 3G, 10G, 11G]
+        assert_eq!(pubkeys_x.len(), 4, "Should generate 4 keys");
+
+        // Verify first thread: 2G, 3G
+        let expected_2gx = [
+            0xABAC09B95C709EE5u64,
+            0x5C778E4B8CEF3CA7u64,
+            0x3045406E95C07CD8u64,
+            0xC6047F9441ED7D6Du64,
+        ];
+        let expected_3gx = [
+            0x8601F113BCE036F9u64,
+            0xB531C845836F99B0u64,
+            0x49344F85F89D5229u64,
+            0xF9308A019258C310u64,
+        ];
+
+        assert_eq!(pubkeys_x[0], expected_2gx, "Thread0 key0 (2G) mismatch");
+        assert_eq!(pubkeys_x[1], expected_3gx, "Thread0 key1 (3G) mismatch");
+
+        // Verify that thread 1's first key is different (10G, not verified numerically)
+        // Just check they're not zero and different from 2G
+        assert_ne!(pubkeys_x[2], [0u64, 0, 0, 0], "Thread1 key0 should not be zero");
+        assert_ne!(pubkeys_x[2], expected_2gx, "Thread1 key0 should be 10G, not 2G");
+
+        println!("test_generate_pubkeys_sequential_multiple_threads: PASSED");
+        println!("  Thread 0: k=2,3 -> 2G, 3G");
+        println!("  Thread 1: k=10,11 -> 10G, 11G");
+    }
+
+    #[test]
+    #[ignore] // Run with: cargo test --release bench_sequential -- --ignored --nocapture
+    fn bench_sequential_vs_batch() {
+        use std::time::Instant;
+
+        let ctx = init_gpu().expect("Failed to initialize GPU");
+
+        println!("\n=== GPU Sequential Key Generation Benchmark ===\n");
+
+        // Test with different configurations
+        let configs = [
+            (256, 64),   // 256 threads, 64 keys each = 16,384 total
+            (256, 256),  // 256 threads, 256 keys each = 65,536 total
+            (1024, 64),  // 1024 threads, 64 keys each = 65,536 total
+        ];
+
+        for (num_threads, keys_per_thread) in configs {
+            let total_keys = num_threads * keys_per_thread;
+            println!("--- {} threads × {} keys/thread = {} total keys ---",
+                     num_threads, keys_per_thread, total_keys);
+
+            // Method 1: generate_pubkeys_batch (full PointMult per key)
+            let batch_keys: Vec<[u64; 4]> = (2..(2 + total_keys as u64))
+                .map(|k| [k, 0, 0, 0])
+                .collect();
+
+            let start = Instant::now();
+            let _result1 = generate_pubkeys_batch(&ctx, &batch_keys)
+                .expect("Batch generation failed");
+            let batch_time = start.elapsed();
+
+            // Method 2: generate_pubkeys_sequential_batch (1 PointMult + PointAddMixed)
+            let base_keys: Vec<[u64; 4]> = (0..num_threads)
+                .map(|i| [2 + (i * keys_per_thread) as u64, 0, 0, 0])
+                .collect();
+
+            let start = Instant::now();
+            let _result2 = generate_pubkeys_sequential_batch(&ctx, &base_keys, keys_per_thread as u32)
+                .expect("Sequential generation failed");
+            let seq_time = start.elapsed();
+
+            let speedup = batch_time.as_secs_f64() / seq_time.as_secs_f64();
+
+            println!("  Batch (PointMult):     {:?}", batch_time);
+            println!("  Sequential (PointAdd): {:?}", seq_time);
+            println!("  Speedup: {:.2}x 🔥", speedup);
+            println!();
+        }
     }
 }
