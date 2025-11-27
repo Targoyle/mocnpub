@@ -870,6 +870,168 @@ extern "C" __global__ void generate_pubkeys_sequential(
 // ============================================================================
 
 /**
+ * Sequential public key generation with Montgomery's Trick (Phase 2)
+ *
+ * This kernel combines the sequential key generation (Phase 1) with
+ * Montgomery's Trick for batch inverse calculation.
+ *
+ * Montgomery's Trick:
+ *   Instead of computing N separate inversions (each ~256 operations),
+ *   we compute all N inverses with just ONE inversion + 3(N-1) multiplications.
+ *
+ *   Algorithm:
+ *     Step 1: Compute cumulative products
+ *       c[0] = Z[0]
+ *       c[i] = c[i-1] * Z[i]  for i = 1, ..., n-1
+ *
+ *     Step 2: Single inversion
+ *       u = c[n-1]^(-1)
+ *
+ *     Step 3: Compute individual inverses (reverse order)
+ *       for i = n-1 down to 1:
+ *         Z_inv[i] = u * c[i-1]
+ *         u = u * Z[i]
+ *       Z_inv[0] = u
+ *
+ *   Cost: 1 _ModInv + 3(N-1) _ModMult
+ *   vs N × _ModInv for naive approach
+ *
+ *   For N=256: ~85x reduction in inverse calculations!
+ *
+ * Memory usage per thread:
+ *   - X, Y, Z arrays: 3 * 256 * 32 bytes = 24 KB
+ *   - Cumulative products: 256 * 32 bytes = 8 KB
+ *   - Total: ~32 KB (spills to local memory)
+ *
+ * Input:
+ *   - base_keys: starting private keys [num_threads * 4]
+ *   - num_threads: number of threads
+ *   - keys_per_thread: consecutive keys per thread (max 256)
+ *
+ * Output:
+ *   - pubkeys_x: x-coordinates [num_threads * keys_per_thread * 4]
+ */
+#define MAX_KEYS_PER_THREAD 256
+
+extern "C" __global__ void generate_pubkeys_sequential_montgomery(
+    const uint64_t* base_keys,
+    uint64_t* pubkeys_x,
+    uint32_t num_threads,
+    uint32_t keys_per_thread
+)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_threads) return;
+
+    // Local arrays for storing intermediate Jacobian coordinates
+    // These will spill to local memory (backed by global memory) if too large
+    uint64_t X_arr[MAX_KEYS_PER_THREAD][4];
+    uint64_t Y_arr[MAX_KEYS_PER_THREAD][4];
+    uint64_t Z_arr[MAX_KEYS_PER_THREAD][4];
+    uint64_t c[MAX_KEYS_PER_THREAD][4];  // Cumulative products
+
+    // Clamp keys_per_thread to MAX_KEYS_PER_THREAD
+    uint32_t n = keys_per_thread;
+    if (n > MAX_KEYS_PER_THREAD) n = MAX_KEYS_PER_THREAD;
+
+    // Load base private key
+    uint64_t k[4];
+    for (int i = 0; i < 4; i++) {
+        k[i] = base_keys[idx * 4 + i];
+    }
+
+    // === Phase 1: Generate all points in Jacobian coordinates ===
+
+    // First point: P = k * G (heavy operation)
+    uint64_t Px[4], Py[4], Pz[4];
+    _PointMult(k, _Gx, _Gy, Px, Py, Pz);
+
+    // Store first point
+    for (int i = 0; i < 4; i++) {
+        X_arr[0][i] = Px[i];
+        Y_arr[0][i] = Py[i];
+        Z_arr[0][i] = Pz[i];
+    }
+
+    // Generate subsequent points using P = P + G (light operation!)
+    for (uint32_t key_idx = 1; key_idx < n; key_idx++) {
+        uint64_t tempX[4], tempY[4], tempZ[4];
+        _PointAddMixed(Px, Py, Pz, _Gx, _Gy, tempX, tempY, tempZ);
+
+        // Copy and store
+        for (int i = 0; i < 4; i++) {
+            Px[i] = tempX[i];
+            Py[i] = tempY[i];
+            Pz[i] = tempZ[i];
+            X_arr[key_idx][i] = Px[i];
+            Y_arr[key_idx][i] = Py[i];
+            Z_arr[key_idx][i] = Pz[i];
+        }
+    }
+
+    // === Phase 2: Montgomery's Trick for batch inverse ===
+
+    // Step 1: Compute cumulative products
+    // c[0] = Z[0]
+    for (int i = 0; i < 4; i++) {
+        c[0][i] = Z_arr[0][i];
+    }
+    // c[i] = c[i-1] * Z[i]
+    for (uint32_t i = 1; i < n; i++) {
+        _ModMult(c[i-1], Z_arr[i], c[i]);
+    }
+
+    // Step 2: Compute inverse of cumulative product (SINGLE _ModInv!)
+    uint64_t u[4];
+    _ModInv(c[n-1], u);
+
+    // Step 3: Compute individual inverses (reverse order) and convert to Affine
+    for (int32_t i = n - 1; i >= 1; i--) {
+        // Z_inv = u * c[i-1]
+        uint64_t Z_inv[4];
+        _ModMult(u, c[i-1], Z_inv);
+
+        // Convert to Affine: x = X * Z_inv^2
+        uint64_t Z_inv_squared[4];
+        _ModSquare(Z_inv, Z_inv_squared);
+
+        uint64_t x[4];
+        _ModMult(X_arr[i], Z_inv_squared, x);
+
+        // Store x-coordinate
+        uint32_t output_idx = (idx * keys_per_thread + i) * 4;
+        for (int j = 0; j < 4; j++) {
+            pubkeys_x[output_idx + j] = x[j];
+        }
+
+        // u = u * Z[i] (prepare for next iteration)
+        uint64_t temp[4];
+        _ModMult(u, Z_arr[i], temp);
+        for (int j = 0; j < 4; j++) {
+            u[j] = temp[j];
+        }
+    }
+
+    // Handle first point: Z_inv[0] = u
+    {
+        uint64_t Z_inv_squared[4];
+        _ModSquare(u, Z_inv_squared);
+
+        uint64_t x[4];
+        _ModMult(X_arr[0], Z_inv_squared, x);
+
+        uint32_t output_idx = idx * keys_per_thread * 4;
+        for (int j = 0; j < 4; j++) {
+            pubkeys_x[output_idx + j] = x[j];
+        }
+    }
+}
+
+// ============================================================================
+// Test Kernels
+// ============================================================================
+
+/**
  * Test kernel: Modular addition
  */
 extern "C" __global__ void test_mod_add(

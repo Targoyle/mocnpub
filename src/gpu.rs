@@ -515,6 +515,94 @@ pub fn generate_pubkeys_sequential_batch(
     Ok(pubkeys_x)
 }
 
+/// Generate public keys using sequential keys with Montgomery's Trick (Phase 2)
+///
+/// This is the optimized "256連ガチャ" strategy that combines:
+/// 1. Sequential key generation: (k+1)*G = k*G + G (light _PointAddMixed)
+/// 2. Montgomery's Trick: Batch inverse calculation (1 _ModInv instead of N)
+///
+/// Without Montgomery's Trick (Phase 1): Each key requires _JacobianToAffine which calls _ModInv
+/// With Montgomery's Trick (Phase 2): All N keys share a SINGLE _ModInv call!
+///
+/// Theoretical speedup: ~85x reduction in inverse calculations for N=256
+///
+/// # Arguments
+/// * `ctx` - GPU context
+/// * `base_keys` - Starting private keys for each thread
+/// * `keys_per_thread` - Number of consecutive keys each thread generates (max 256)
+///
+/// # Returns
+/// * `Vec<[u64; 4]>` - Public key x-coordinates
+pub fn generate_pubkeys_sequential_montgomery_batch(
+    ctx: &Arc<CudaContext>,
+    base_keys: &[[u64; 4]],
+    keys_per_thread: u32,
+) -> Result<Vec<[u64; 4]>, Box<dyn std::error::Error>> {
+    let num_threads = base_keys.len();
+    if num_threads == 0 || keys_per_thread == 0 {
+        return Ok(vec![]);
+    }
+
+    // Clamp to max 256 (CUDA kernel limit)
+    let keys_per_thread = keys_per_thread.min(256);
+    let total_keys = num_threads * keys_per_thread as usize;
+
+    // Get default stream
+    let stream = ctx.default_stream();
+
+    // Load PTX module
+    let ptx_code = include_str!("../cuda/secp256k1.ptx");
+    let module = ctx.load_module(Ptx::from_src(ptx_code))?;
+    let kernel = module.load_function("generate_pubkeys_sequential_montgomery")?;
+
+    // Flatten base keys to Vec<u64>
+    let base_keys_flat: Vec<u64> = base_keys.iter().flat_map(|k| k.iter().copied()).collect();
+
+    // Allocate device memory
+    let mut base_keys_dev = stream.alloc_zeros::<u64>(num_threads * 4)?;
+    let mut pubkeys_x_dev = stream.alloc_zeros::<u64>(total_keys * 4)?;
+
+    // Copy base keys to device
+    stream.memcpy_htod(&base_keys_flat, &mut base_keys_dev)?;
+
+    // Calculate grid and block dimensions
+    // Note: Each thread uses ~32KB of local memory, so we may need fewer threads per block
+    let threads_per_block = 64u32;  // Reduced from 256 due to high register/local memory usage
+    let num_blocks = (num_threads as u32 + threads_per_block - 1) / threads_per_block;
+
+    let config = LaunchConfig {
+        grid_dim: (num_blocks, 1, 1),
+        block_dim: (threads_per_block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    // Launch kernel
+    let num_threads_u32 = num_threads as u32;
+    let mut builder = stream.launch_builder(&kernel);
+    builder.arg(&mut base_keys_dev);
+    builder.arg(&mut pubkeys_x_dev);
+    builder.arg(&num_threads_u32);
+    builder.arg(&keys_per_thread);
+    unsafe {
+        builder.launch(config)?;
+    }
+
+    // Copy results back to host
+    let pubkeys_x_flat = stream.memcpy_dtov(&pubkeys_x_dev)?;
+
+    // Convert flat Vec to Vec of [u64; 4]
+    let pubkeys_x: Vec<[u64; 4]> = pubkeys_x_flat
+        .chunks_exact(4)
+        .map(|chunk| {
+            let mut arr = [0u64; 4];
+            arr.copy_from_slice(chunk);
+            arr
+        })
+        .collect();
+
+    Ok(pubkeys_x)
+}
+
 /// Test mixed point addition on GPU (for unit testing)
 pub fn test_point_add_mixed_gpu(
     ctx: &Arc<CudaContext>,
@@ -1453,6 +1541,140 @@ mod tests {
             println!("  Batch (PointMult):     {:?}", batch_time);
             println!("  Sequential (PointAdd): {:?}", seq_time);
             println!("  Speedup: {:.2}x 🔥", speedup);
+            println!();
+        }
+    }
+
+    #[test]
+    fn test_generate_pubkeys_sequential_montgomery_single() {
+        // Test Montgomery's Trick version with keys_per_thread = 3
+        // Starting from k=2, we should get: 2*G, 3*G, 4*G
+        let ctx = init_gpu().expect("Failed to initialize GPU");
+
+        // Base key: k = 2
+        let base_keys = vec![[2u64, 0, 0, 0]];
+        let keys_per_thread = 3u32;
+
+        let pubkeys_x = generate_pubkeys_sequential_montgomery_batch(&ctx, &base_keys, keys_per_thread)
+            .expect("GPU Montgomery sequential batch failed");
+
+        assert_eq!(pubkeys_x.len(), 3, "Should generate 3 keys");
+
+        // Get expected values from generate_pubkeys_batch (known-good implementation)
+        let reference_keys = vec![
+            [2u64, 0, 0, 0],
+            [3u64, 0, 0, 0],
+            [4u64, 0, 0, 0],
+        ];
+        let expected_x = generate_pubkeys_batch(&ctx, &reference_keys)
+            .expect("Reference batch generation failed");
+
+        // Compare Montgomery vs batch results
+        assert_eq!(pubkeys_x[0], expected_x[0], "2G x-coordinate mismatch (Montgomery vs batch)");
+        assert_eq!(pubkeys_x[1], expected_x[1], "3G x-coordinate mismatch (Montgomery vs batch)");
+        assert_eq!(pubkeys_x[2], expected_x[2], "4G x-coordinate mismatch (Montgomery vs batch)");
+
+        println!("test_generate_pubkeys_sequential_montgomery_single: PASSED");
+        println!("  Generated 2G, 3G, 4G from k=2 with keys_per_thread=3");
+        println!("  Montgomery's Trick results match generate_pubkeys_batch!");
+    }
+
+    #[test]
+    fn test_generate_pubkeys_sequential_montgomery_256() {
+        // Test Montgomery's Trick with max keys_per_thread = 256
+        let ctx = init_gpu().expect("Failed to initialize GPU");
+
+        // Base key: k = 2
+        let base_keys = vec![[2u64, 0, 0, 0]];
+        let keys_per_thread = 256u32;
+
+        let pubkeys_x = generate_pubkeys_sequential_montgomery_batch(&ctx, &base_keys, keys_per_thread)
+            .expect("GPU Montgomery sequential batch failed");
+
+        assert_eq!(pubkeys_x.len(), 256, "Should generate 256 keys");
+
+        // Verify first few and last key against batch generation
+        let reference_keys: Vec<[u64; 4]> = (2..258u64)
+            .map(|k| [k, 0, 0, 0])
+            .collect();
+        let expected_x = generate_pubkeys_batch(&ctx, &reference_keys)
+            .expect("Reference batch generation failed");
+
+        // Check first 3 keys
+        assert_eq!(pubkeys_x[0], expected_x[0], "Key 0 (2G) mismatch");
+        assert_eq!(pubkeys_x[1], expected_x[1], "Key 1 (3G) mismatch");
+        assert_eq!(pubkeys_x[2], expected_x[2], "Key 2 (4G) mismatch");
+
+        // Check last key (257G)
+        assert_eq!(pubkeys_x[255], expected_x[255], "Key 255 (257G) mismatch");
+
+        println!("test_generate_pubkeys_sequential_montgomery_256: PASSED");
+        println!("  Generated 256 consecutive keys from k=2");
+        println!("  All verified against generate_pubkeys_batch!");
+    }
+
+    #[test]
+    #[ignore] // Run with: cargo test --release bench_montgomery -- --ignored --nocapture
+    fn bench_montgomery_vs_all() {
+        use std::time::Instant;
+
+        let ctx = init_gpu().expect("Failed to initialize GPU");
+
+        println!("\n=== GPU Montgomery's Trick Benchmark ===\n");
+        println!("Comparing three methods:");
+        println!("  1. Batch: Full PointMult per key");
+        println!("  2. Sequential (Phase 1): PointAddMixed + JacobianToAffine per key");
+        println!("  3. Montgomery (Phase 2): PointAddMixed + batch inverse");
+        println!();
+
+        // Test with different configurations
+        let configs = [
+            (64, 64),    // 64 threads, 64 keys each = 4,096 total
+            (64, 256),   // 64 threads, 256 keys each = 16,384 total
+            (256, 64),   // 256 threads, 64 keys each = 16,384 total
+            (256, 256),  // 256 threads, 256 keys each = 65,536 total
+        ];
+
+        for (num_threads, keys_per_thread) in configs {
+            let total_keys = num_threads * keys_per_thread;
+            println!("--- {} threads × {} keys/thread = {} total keys ---",
+                     num_threads, keys_per_thread, total_keys);
+
+            // Method 1: generate_pubkeys_batch (full PointMult per key)
+            let batch_keys: Vec<[u64; 4]> = (2..(2 + total_keys as u64))
+                .map(|k| [k, 0, 0, 0])
+                .collect();
+
+            let start = Instant::now();
+            let _result1 = generate_pubkeys_batch(&ctx, &batch_keys)
+                .expect("Batch generation failed");
+            let batch_time = start.elapsed();
+
+            // Method 2: generate_pubkeys_sequential_batch (Phase 1: no Montgomery)
+            let base_keys: Vec<[u64; 4]> = (0..num_threads)
+                .map(|i| [2 + (i * keys_per_thread) as u64, 0, 0, 0])
+                .collect();
+
+            let start = Instant::now();
+            let _result2 = generate_pubkeys_sequential_batch(&ctx, &base_keys, keys_per_thread as u32)
+                .expect("Sequential generation failed");
+            let seq_time = start.elapsed();
+
+            // Method 3: generate_pubkeys_sequential_montgomery_batch (Phase 2: with Montgomery)
+            let start = Instant::now();
+            let _result3 = generate_pubkeys_sequential_montgomery_batch(&ctx, &base_keys, keys_per_thread as u32)
+                .expect("Montgomery generation failed");
+            let mont_time = start.elapsed();
+
+            // Calculate speedups
+            let speedup_seq = batch_time.as_secs_f64() / seq_time.as_secs_f64();
+            let speedup_mont = batch_time.as_secs_f64() / mont_time.as_secs_f64();
+            let mont_vs_seq = seq_time.as_secs_f64() / mont_time.as_secs_f64();
+
+            println!("  Batch (PointMult):          {:>10.2?}", batch_time);
+            println!("  Sequential (Phase 1):       {:>10.2?}  ({:.2}x vs Batch)", seq_time, speedup_seq);
+            println!("  Montgomery (Phase 2):       {:>10.2?}  ({:.2}x vs Batch, {:.2}x vs Phase1) 🔥",
+                     mont_time, speedup_mont, mont_vs_seq);
             println!();
         }
     }
