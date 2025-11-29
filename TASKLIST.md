@@ -26,7 +26,8 @@
 | CPU（16スレッド） | ~70,000 keys/sec | 1x |
 | GPU Montgomery（エンドモルフィズム前） | ~391M keys/sec | 5,586x |
 | GPU + エンドモルフィズム | 1.14B keys/sec | 16,286x |
-| **GPU + _ModSquare 最適化（Windows）** | **1.18B keys/sec** | **16,857x** 🔥 |
+| GPU + _ModSquare 最適化 | 1.18B keys/sec | 16,857x |
+| **GPU + Tail Effect 対策（Windows）** | **1.196B keys/sec** | **17,089x** 🔥 |
 
 **8文字 prefix が約 30 秒で見つかる！** 🎉
 
@@ -77,10 +78,14 @@
 
 | # | 最適化 | 期待効果 | 優先度 |
 |---|--------|----------|--------|
-| 1 | Grid Size 調整（Tail Effect 対策） | 高い？ | 中 |
-| 2 | パラメータ検証 | 不明 | 低 |
+| 1 | パラメータ検証 | 不明 | 低 |
 
 ### ✅ 完了した最適化
+
+- **Tail Effect 対策**（2025-11-29）
+  - SM 数を動的取得、batch_size を SM × threads_per_block の整数倍に自動調整
+  - 65536 → 67200（15 waves ぴったり、アイドル SM ゼロ）
+  - 結果：1.18B → **1.196B keys/sec**（+1.4%）🔥
 
 - **`_ModSquare` 最適化**（2025-11-29）
   - 対称性を利用：16回 → 10回の乗算（37.5% 削減）
