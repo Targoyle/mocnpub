@@ -81,8 +81,20 @@
 
 | # | 最適化 | 期待効果 | 優先度 |
 |---|--------|----------|--------|
-| 1 | メモリコアレッシング最適化 | 不明 | 低 |
+| 1 | **メモリコアレッシング最適化（SoA）** | **~20%** | **高** |
 | 2 | ダブルバッファリング | <1%（カーネル間隙間は 0.1%）| 低 |
+
+### 📋 メモリコアレッシング最適化の詳細
+
+**問題**：Montgomery's Trick のローカル配列がメモリ非効率
+- `X_arr[MAX_KEYS_PER_THREAD][4]` 等が AoS レイアウト
+- 32バイト中1バイトしか活用できていない（ncu で検出）
+- Est. Speedup: local loads ~10%, local stores ~12%
+
+**解決策**：SoA（Structure of Arrays）レイアウトに変更
+- ローカル配列 → Rust 側で確保したグローバルメモリ
+- SoA レイアウトでメモリコアレッシング最適化
+- **副次的メリット**: `MAX_KEYS_PER_THREAD` のコンパイル時制限がなくなる！
 
 ### ✅ 完了した最適化
 
@@ -118,11 +130,15 @@
   - メモリ転送: 0.1%（オーバーヘッド極小）
   - GPU 使用率: 95%（batch_size 最適化後）
 
-- **ncu プロファイリング**（2025-11-29）
-  - Compute Throughput: 73.83%（Compute bound）
+- **ncu プロファイリング**（2025-11-29, 2025-11-30）
+  - Compute Throughput: 45〜74%（Compute bound）
   - Memory Throughput: 12.16%
-  - Occupancy: 33%（レジスタ 120/thread が制限要因）
-  - ALU utilization: 43.4%
+  - Occupancy: 33%（レジスタ 130/thread が制限要因）
+  - Local Memory Spilling: 0%（スピルなし ✅）
+  - **メモリコアレッシング問題を検出**：
+    - local loads: 32バイト中1バイトしか活用できていない（Est. Speedup ~10%）
+    - local stores: 32バイト中1バイトしか活用できていない（Est. Speedup ~12%）
+    - → SoA 最適化で ~20% 改善の余地あり
 
 ### 見送った最適化
 

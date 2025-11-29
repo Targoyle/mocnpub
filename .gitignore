@@ -7,3 +7,6 @@ profile_report.*
 # nsys reports
 *.nsys-rep
 *.sqlite
+
+# ncu reports
+*.ncu-rep
