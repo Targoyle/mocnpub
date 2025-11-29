@@ -577,8 +577,8 @@ pub fn generate_pubkeys_sequential_montgomery_batch(
         return Ok(vec![]);
     }
 
-    // Clamp to max 512 (CUDA kernel limit)
-    let keys_per_thread = keys_per_thread.min(512);
+    // Clamp to max 4096 (CUDA kernel limit)
+    let keys_per_thread = keys_per_thread.min(4096);
     let total_keys = num_threads * keys_per_thread as usize;
 
     // Get default stream
@@ -681,8 +681,8 @@ pub fn generate_pubkeys_with_prefix_match(
         return Ok(vec![]);
     }
 
-    // Clamp to max 512 (CUDA kernel limit)
-    let keys_per_thread = keys_per_thread.min(512);
+    // Clamp to max 4096 (CUDA kernel limit)
+    let keys_per_thread = keys_per_thread.min(4096);
 
     // Get default stream
     let stream = ctx.default_stream();
