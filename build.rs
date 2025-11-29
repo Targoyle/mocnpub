@@ -56,16 +56,25 @@ fn compile_cu_to_ptx(nvcc: &PathBuf, cu_file: &PathBuf, out_dir: &PathBuf) {
     // 注意: CUDA 13.0 では sm_75 (Turing) が最小サポートアーキテクチャ
     let arch = "sm_75"; // Turing 以降で動作する設定（RTX 20 シリーズ以降）
 
+    // Windows の場合、cl.exe に UTF-8 として解釈させるオプションを追加
+    let mut args = vec![
+        "-ptx".to_string(),
+        "-o".to_string(),
+        ptx_file.to_str().unwrap().to_string(),
+        cu_file.to_str().unwrap().to_string(),
+        format!("-arch={}", arch),
+        // Visual Studio 2026 など新しいバージョンでもコンパイルできるように
+        "-allow-unsupported-compiler".to_string(),
+    ];
+
+    // Windows では cl.exe に UTF-8 オプションを渡す
+    if cfg!(target_os = "windows") {
+        args.push("-Xcompiler".to_string());
+        args.push("/utf-8".to_string());
+    }
+
     let output = Command::new(nvcc)
-        .args([
-            "-ptx",
-            "-o",
-            ptx_file.to_str().unwrap(),
-            cu_file.to_str().unwrap(),
-            &format!("-arch={}", arch),
-            // Visual Studio 2026 など新しいバージョンでもコンパイルできるように
-            "-allow-unsupported-compiler",
-        ])
+        .args(&args)
         .output()
         .expect("Failed to execute nvcc");
 
