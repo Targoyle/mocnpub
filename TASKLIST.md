@@ -2,7 +2,7 @@
 
 **作成日**: 2025-11-14
 **最終更新**: 2025-11-29
-**進捗**: Step 0〜4 完了！🎉 Phase 3 最適化を計画中
+**進捗**: Step 0〜4 完了！🎉 keys_per_thread 最適化で 38,000倍達成！
 
 ---
 
@@ -27,9 +27,10 @@
 | GPU Montgomery（エンドモルフィズム前） | ~391M keys/sec | 5,586x |
 | GPU + エンドモルフィズム | 1.14B keys/sec | 16,286x |
 | GPU + _ModSquare 最適化 | 1.18B keys/sec | 16,857x |
-| **GPU + Tail Effect 対策（Windows）** | **1.196B keys/sec** | **17,089x** 🔥 |
+| GPU + Tail Effect 対策 | 1.196B keys/sec | 17,089x |
+| **GPU + keys_per_thread 最適化（1408）** | **2.63B keys/sec** | **38,000x** 🔥🔥🔥 |
 
-**8文字 prefix が約 30 秒で見つかる！** 🎉
+**8文字 prefix が約 12 秒で見つかる！** 🎉
 
 ---
 
@@ -78,9 +79,16 @@
 
 | # | 最適化 | 期待効果 | 優先度 |
 |---|--------|----------|--------|
-| 1 | パラメータ検証 | 不明 | 低 |
+| 1 | メモリコアレッシング最適化 | 不明 | 低 |
+| 2 | threads_per_block の検証 | 不明 | 低 |
+| 3 | batch_size の検証 | 不明 | 低 |
 
 ### ✅ 完了した最適化
+
+- **keys_per_thread 最適化**（2025-11-29）
+  - MAX_KEYS_PER_THREAD を 256 → 1408 に拡張
+  - VRAM 16GB の限界を探索、最適値を発見
+  - 結果：1.196B → **2.63B keys/sec**（+120%）🔥🔥🔥
 
 - **Tail Effect 対策**（2025-11-29）
   - SM 数を動的取得、batch_size を SM × threads_per_block の整数倍に自動調整
