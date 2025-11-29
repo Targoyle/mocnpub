@@ -6,6 +6,7 @@ use mocnpub_main::gpu::{
     init_gpu, generate_pubkeys_batch,
     generate_pubkeys_sequential_batch,
     generate_pubkeys_sequential_montgomery_batch,
+    test_mod_square_gpu, test_mod_mult_gpu,
 };
 
 /// ベンチマーク: 鍵生成のパフォーマンス
@@ -219,6 +220,34 @@ fn bench_gpu_keys_per_thread(c: &mut Criterion) {
     group.finish();
 }
 
+/// GPU ベンチマーク: _ModSquare vs _ModMult
+///
+/// 2乗（a²）と乗算（a*a）の速度を比較
+fn bench_mod_square_vs_mult(c: &mut Criterion) {
+    let ctx = init_gpu().expect("Failed to initialize GPU");
+
+    let mut group = c.benchmark_group("mod_square_vs_mult");
+
+    // テスト値: 適度に大きな値
+    let a = [0x123456789ABCDEFu64, 0xFEDCBA9876543210u64, 0x1111111111111111u64, 0x2222222222222222u64];
+
+    // _ModSquare: a²
+    group.bench_function("mod_square", |b| {
+        b.iter(|| {
+            test_mod_square_gpu(&ctx, black_box(&a)).unwrap()
+        })
+    });
+
+    // _ModMult: a * a（現在の _ModSquare の内部実装と同等）
+    group.bench_function("mod_mult_self", |b| {
+        b.iter(|| {
+            test_mod_mult_gpu(&ctx, black_box(&a), black_box(&a)).unwrap()
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_keypair_generation,
@@ -232,7 +261,8 @@ criterion_group!(
 criterion_group!(
     gpu_benches,
     bench_gpu_methods,
-    bench_gpu_keys_per_thread
+    bench_gpu_keys_per_thread,
+    bench_mod_square_vs_mult
 );
 
 criterion_main!(benches, gpu_benches);

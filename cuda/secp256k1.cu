@@ -373,12 +373,86 @@ __device__ void _ModMult(const uint64_t a[4], const uint64_t b[4], uint64_t resu
 /**
  * Modular squaring: (a * a) mod p
  * Optimized version of _ModMult(a, a, result)
+ *
+ * Uses symmetry: a² needs only 10 multiplications instead of 16
+ * - Diagonal terms (i == j): 4 multiplications
+ * - Off-diagonal terms (i < j): 6 multiplications, each doubled
  */
 __device__ void _ModSquare(const uint64_t a[4], uint64_t result[4])
 {
-    // For simplicity, use _ModMult
-    // TODO: Implement optimized squaring (can skip half of the multiplications)
-    _ModMult(a, a, result);
+    uint64_t temp[8] = {0};  // 512-bit result
+
+    // Step 1: Compute off-diagonal products (i < j) and double them
+    // We compute a[i] * a[j] for i < j, then add twice to temp
+    uint64_t cross[8] = {0};  // Accumulate cross products
+
+    for (int i = 0; i < 4; i++) {
+        uint64_t carry = 0;
+        for (int j = i + 1; j < 4; j++) {
+            uint64_t low, high;
+            _Mult64(a[i], a[j], &low, &high);
+
+            // Add to cross[i+j] with carry
+            uint64_t s1 = cross[i + j] + low;
+            uint64_t carry1 = (s1 < cross[i + j]) ? 1 : 0;
+
+            uint64_t s2 = s1 + carry;
+            uint64_t carry2 = (s2 < s1) ? 1 : 0;
+
+            cross[i + j] = s2;
+            carry = high + carry1 + carry2;
+        }
+        if (i < 3) {
+            cross[i + 4] += carry;
+        }
+    }
+
+    // Double the cross products (left shift by 1)
+    uint64_t shift_carry = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t new_carry = cross[i] >> 63;  // Top bit
+        cross[i] = (cross[i] << 1) | shift_carry;
+        shift_carry = new_carry;
+    }
+
+    // Step 2: Compute diagonal products (i == j): a[i]²
+    for (int i = 0; i < 4; i++) {
+        uint64_t low, high;
+        _Mult64(a[i], a[i], &low, &high);
+
+        // Add to temp[2*i] and temp[2*i+1]
+        uint64_t s1 = temp[2 * i] + low;
+        uint64_t carry1 = (s1 < temp[2 * i]) ? 1 : 0;
+        temp[2 * i] = s1;
+
+        uint64_t s2 = temp[2 * i + 1] + high;
+        uint64_t carry2 = (s2 < temp[2 * i + 1]) ? 1 : 0;
+
+        uint64_t s3 = s2 + carry1;
+        uint64_t carry3 = (s3 < s2) ? 1 : 0;
+        temp[2 * i + 1] = s3;
+
+        // Propagate carry to higher limbs
+        if (2 * i + 2 < 8) {
+            temp[2 * i + 2] += carry2 + carry3;
+        }
+    }
+
+    // Step 3: Add doubled cross products to temp
+    uint64_t carry = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t s1 = temp[i] + cross[i];
+        uint64_t carry1 = (s1 < temp[i]) ? 1 : 0;
+
+        uint64_t s2 = s1 + carry;
+        uint64_t carry2 = (s2 < s1) ? 1 : 0;
+
+        temp[i] = s2;
+        carry = carry1 | carry2;
+    }
+
+    // Reduce modulo p
+    _Reduce512(temp, result);
 }
 
 /**
