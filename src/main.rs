@@ -45,8 +45,8 @@ struct Args {
     #[arg(long)]
     gpu: bool,
 
-    /// GPU バッチサイズ（デフォルト: 65536）
-    #[arg(long, default_value = "65536")]
+    /// GPU バッチサイズ（デフォルト: 1146880、128 waves）
+    #[arg(long, default_value = "1146880")]
     batch_size: usize,
 
     /// GPU スレッド数/ブロック（デフォルト: 128、RTX 5070 Ti 向け最適値）
