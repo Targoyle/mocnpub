@@ -14,7 +14,8 @@ param(
     [string]$Prefix = "0000"
 )
 
-$exePath = ".\target\release\mocnpub-main.exe"
+$exePath = Join-Path $PSScriptRoot "..\target\release\mocnpub-main.exe"
+$exePath = [System.IO.Path]::GetFullPath($exePath)
 
 if (-not (Test-Path $exePath)) {
     Write-Host "Error: $exePath not found. Run 'cargo build --release' first." -ForegroundColor Red
