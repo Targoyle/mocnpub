@@ -31,7 +31,7 @@ Write-Host "  Prefix:           $Prefix"
 Write-Host ""
 
 # プロセスを起動
-$args = @(
+$procArgs = @(
     "--gpu",
     "--prefix", $Prefix,
     "--limit", "0",
@@ -42,7 +42,7 @@ $args = @(
 
 $pinfo = New-Object System.Diagnostics.ProcessStartInfo
 $pinfo.FileName = $exePath
-$pinfo.Arguments = $args -join " "
+$pinfo.Arguments = $procArgs -join " "
 $pinfo.RedirectStandardOutput = $true
 $pinfo.RedirectStandardError = $true
 $pinfo.UseShellExecute = $false
