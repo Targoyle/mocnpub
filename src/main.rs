@@ -332,8 +332,8 @@ fn run_gpu_mining(
             }
         };
 
-        // 試行回数を更新
-        total_count += (batch_size as u64) * (keys_per_thread as u64);
+        // 試行回数を更新（エンドモルフィズムで 3 つの X 座標をチェック）
+        total_count += (batch_size as u64) * (keys_per_thread as u64) * 3;
 
         // 3. マッチした結果を処理
         for m in matches {
