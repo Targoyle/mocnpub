@@ -651,6 +651,7 @@ dependencies = [
  "num-complex",
  "num_cpus",
  "rand 0.8.5",
+ "rayon",
  "secp256k1",
 ]
 

@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use std::time::Instant;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
+use rayon::prelude::*;
 
 // lib.rs から共通関数を import
 use mocnpub_main::{pubkey_to_npub, seckey_to_nsec, validate_prefix};
@@ -334,8 +335,6 @@ fn run_gpu_mining(
     let start = Instant::now();
     let mut total_count: u64 = 0;
     let mut found_count: usize = 0;
-    let mut rng = rand::thread_rng();
-
     // ファイル出力の準備（append モード）
     let mut output_file = if let Some(path) = output_path {
         Some(OpenOptions::new()
@@ -355,23 +354,26 @@ fn run_gpu_mining(
     let mut pubkeys_x_u64: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
     let mut pubkeys_y_u64: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
 
-    // secp256k1 コンテキスト（公開鍵計算用）
-    let secp = Secp256k1::new();
-
     // メインループ
     loop {
-        // 1. ランダムな base keys を生成し、公開鍵も計算（CPU）
-        for i in 0..batch_size {
-            rng.fill_bytes(&mut privkey_bytes[i]);
-            privkeys_u64[i] = bytes_to_u64x4(&privkey_bytes[i]);
+        // 1. ランダムな base keys を生成し、公開鍵も計算（CPU、並列）
+        privkey_bytes.par_iter_mut()
+            .zip(privkeys_u64.par_iter_mut())
+            .zip(pubkeys_x_u64.par_iter_mut())
+            .zip(pubkeys_y_u64.par_iter_mut())
+            .for_each(|(((privkey_byte, privkey_u64), pubkey_x), pubkey_y)| {
+                // スレッドローカルな RNG と secp256k1 コンテキスト
+                rand::thread_rng().fill_bytes(privkey_byte);
+                *privkey_u64 = bytes_to_u64x4(privkey_byte);
 
-            // CPU で公開鍵を計算（GPU 側の _PointMult をスキップするため）
-            let sk = SecretKey::from_slice(&privkey_bytes[i]).expect("valid secret key");
-            let pk = sk.public_key(&secp);
-            let (x, y) = pubkey_to_xy_u64x4(&pk);
-            pubkeys_x_u64[i] = x;
-            pubkeys_y_u64[i] = y;
-        }
+                // CPU で公開鍵を計算（GPU 側の _PointMult をスキップするため）
+                let sk = SecretKey::from_slice(privkey_byte).expect("valid secret key");
+                let secp = Secp256k1::new();
+                let pk = sk.public_key(&secp);
+                let (x, y) = pubkey_to_xy_u64x4(&pk);
+                *pubkey_x = x;
+                *pubkey_y = y;
+            });
 
         // 2. GPU で公開鍵生成 + prefix マッチング
         let matches = match generate_pubkeys_with_prefix_match(
