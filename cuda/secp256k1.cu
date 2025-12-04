@@ -89,9 +89,9 @@ __device__ void _Add256(const uint64_t a[4], const uint64_t b[4], uint64_t resul
 
 /**
  * Subtract two 256-bit numbers (a - b)
- * Assumes a >= b
+ * Returns the result and borrow (1 if a < b, 0 otherwise)
  */
-__device__ void _Sub256(const uint64_t a[4], const uint64_t b[4], uint64_t result[4])
+__device__ void _Sub256(const uint64_t a[4], const uint64_t b[4], uint64_t result[4], uint64_t* borrow_out)
 {
     uint64_t borrow = 0;
 
@@ -106,6 +106,8 @@ __device__ void _Sub256(const uint64_t a[4], const uint64_t b[4], uint64_t resul
         result[i] = final_diff;
         borrow = borrow1 | borrow2;
     }
+
+    *borrow_out = borrow;
 }
 
 /**
@@ -123,39 +125,54 @@ __device__ int _Compare256(const uint64_t a[4], const uint64_t b[4])
 
 /**
  * Modular addition: (a + b) mod p
+ * Branchless implementation to avoid warp divergence
  */
 __device__ void _ModAdd(const uint64_t a[4], const uint64_t b[4], uint64_t result[4])
 {
+    // Always compute sum = a + b
     uint64_t sum[4];
     uint64_t carry;
-
     _Add256(a, b, sum, &carry);
 
-    // If carry or sum >= p, subtract p
-    if (carry || _Compare256(sum, _P) >= 0) {
-        _Sub256(sum, _P, result);
-    } else {
-        for (int i = 0; i < 4; i++) {
-            result[i] = sum[i];
-        }
+    // Always compute diff = sum - p (may underflow)
+    uint64_t diff[4];
+    uint64_t borrow;
+    _Sub256(sum, _P, diff, &borrow);
+
+    // Use diff if: carry || !borrow (i.e., sum >= p or overflow)
+    // use_diff = carry | (1 - borrow)
+    uint64_t use_diff = carry | (1 - borrow);
+    uint64_t mask = -use_diff;  // use_diff ? 0xFFFF... : 0
+
+    // result = (diff & mask) | (sum & ~mask)
+    for (int i = 0; i < 4; i++) {
+        result[i] = (diff[i] & mask) | (sum[i] & ~mask);
     }
 }
 
 /**
  * Modular subtraction: (a - b) mod p
- * If a < b, add p first
+ * Branchless implementation to avoid warp divergence
  */
 __device__ void _ModSub(const uint64_t a[4], const uint64_t b[4], uint64_t result[4])
 {
-    if (_Compare256(a, b) >= 0) {
-        _Sub256(a, b, result);
-    } else {
-        // a < b, so compute (a + p) - b
-        uint64_t temp[4];
-        uint64_t carry;
-        _Add256(a, _P, temp, &carry);
-        _Sub256(temp, b, result);
+    // Always compute a - b (may underflow)
+    uint64_t diff[4];
+    uint64_t borrow;
+    _Sub256(a, b, diff, &borrow);
+
+    // If borrow, add p back (branchless)
+    // mask = borrow ? 0xFFFFFFFFFFFFFFFF : 0
+    uint64_t mask = -borrow;
+
+    // diff + (p & mask)
+    uint64_t p_masked[4];
+    for (int i = 0; i < 4; i++) {
+        p_masked[i] = _P[i] & mask;
     }
+
+    uint64_t carry;
+    _Add256(diff, p_masked, result, &carry);
 }
 
 /**
