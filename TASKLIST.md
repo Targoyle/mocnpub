@@ -2,7 +2,7 @@
 
 **作成日**: 2025-11-14
 **最終更新**: 2025-12-04
-**進捗**: Step 0〜4 完了！🎉 CPU 公開鍵プリコンピュート戦法に挑戦中！
+**進捗**: Step 0〜4 完了！🎉 ブランチレス化で 3.16B keys/sec 達成！
 
 ---
 
@@ -30,7 +30,8 @@
 | GPU + Tail Effect 対策 | 1.196B keys/sec | 17,089x |
 | GPU + keys_per_thread 最適化（1408） | 2.63B keys/sec | 38,000x |
 | GPU + threads_per_block 最適化（128） | 2.80B keys/sec | 40,000x |
-| **GPU + batch_size 最適化（1146880）** | **3.09B keys/sec** | **44,000x** 🔥🔥🔥 |
+| GPU + batch_size 最適化（1146880） | 3.09B keys/sec | 44,000x |
+| **GPU + ブランチレス化（_ModSub/_ModAdd）** | **3.16B keys/sec** | **45,143x** 🔥🔥🔥 |
 
 **8文字 prefix が約 10 秒で見つかる！** 🎉
 
@@ -162,30 +163,16 @@ SoA（Structure of Arrays）最適化を実装：
 
 | # | 最適化 | 期待効果 | 優先度 |
 |---|--------|----------|--------|
-| 1 | **`_ModSub`/`_ModAdd` のブランチレス化** | Branch Efficiency 改善（78.88% → ?）| 高 |
-| 2 | AoS 版のさらなるチューニング | batch_size / keys_per_thread の最適値探索 | 中 |
-| 3 | ダブルバッファリング | <1%（カーネル間隙間は 0.1%）| 低 |
-
-### 🔍 Branch Efficiency 分析（2025-12-04）
-
-**現状**: Branch Efficiency **78.88%**（約 21% のダイバージェンス）
-
-**原因特定**:
-- `_ModSub` と `_ModAdd` の比較分岐が主犯！
-- 256-bit 値の大小比較 → 結果がランダム → 約 50% ダイバージェンス
-- `_ModSub` は keys_per_thread=1408 で **約 2814 回/スレッド** 呼ばれる
-
-**対策案**: ブランチレス化
-```c
-// Before: 分岐あり
-if (borrow) { result = diff + p; }
-
-// After: ブランチレス
-uint64_t mask = -borrow;  // borrow=1 → 0xFFFF..., borrow=0 → 0
-result = diff + (p & mask);
-```
+| 1 | AoS 版のさらなるチューニング | batch_size / keys_per_thread の最適値探索 | 中 |
+| 2 | ダブルバッファリング | <1%（カーネル間隙間は 0.1%）| 低 |
 
 ### ✅ 完了した最適化
+
+- **`_ModSub`/`_ModAdd` ブランチレス化**（2025-12-04）🔥
+  - Branch Efficiency 78.88% の原因を特定（256-bit 比較分岐がランダム → 約 50% ダイバージェンス）
+  - `_Sub256` を borrow を返すように変更
+  - `_ModSub`/`_ModAdd` をマスク選択でブランチレス化
+  - 結果：3.09B → **3.16B keys/sec**（+2.3%）🔥
 
 - **batch_size 最適化**（2025-11-29）
   - デフォルトを 65536 → 1146880（128 waves）に拡張
