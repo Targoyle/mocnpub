@@ -168,9 +168,9 @@ SoA（Structure of Arrays）最適化を実装：
 
 | # | タスク | 状態 |
 |---|--------|------|
-| 1 | keys_per_thread 固定化（ビルド時確定） | ⬜ 未着手 |
-| 2 | MAX_KEYS_PER_THREAD を環境変数で指定 | ⬜ 未着手 |
-| 3 | 不要な引数の削除（`--keys-per-thread` 等） | ⬜ 未着手 |
+| 1 | keys_per_thread 固定化（ビルド時確定） | ✅ 完了 |
+| 2 | MAX_KEYS_PER_THREAD を環境変数で指定 | ✅ 完了 |
+| 3 | 不要な引数の削除（`--keys-per-thread` 等） | ✅ 完了 |
 | 4 | batch_size 最終調整 | ⬜ 未着手 |
 | 5 | README 整備 | ⬜ 未着手 |
 
