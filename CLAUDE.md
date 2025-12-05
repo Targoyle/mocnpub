@@ -239,8 +239,7 @@
 | GPU + keys_per_thread 最適化（1408） | 2.63B keys/sec | 38,000x |
 | GPU + threads_per_block 最適化（128） | 2.80B keys/sec | 40,000x |
 | GPU + batch_size 最適化（1146880） | 3.09B keys/sec | 44,000x |
-| GPU + ブランチレス化（_ModSub/_ModAdd） | 3.16B keys/sec | 45,143x |
-| **GPU + _Reduce512 ブランチレス化** | **3.14B keys/sec** | **44,857x** 🔥🔥🔥 |
+| **GPU + ブランチレス化（_ModSub/_ModAdd）** | **3.16B keys/sec** | **45,143x** 🔥🔥🔥 |
 
 **8文字 prefix が約 10 秒で見つかる！** 🎉
 
@@ -263,7 +262,6 @@
 | **threads_per_block 最適化** | +6.2% | ✅ 完了 |
 | **batch_size 最適化** | +10.4% | ✅ 完了 |
 | **`_ModSub`/`_ModAdd` ブランチレス化** | +2.3%（Branch Efficiency 78.88%→82.41%） | ✅ 完了 |
-| **`_Reduce512` ブランチレス化** | ダイバージェンス 99.16%→解消（パフォーマンス横ばい） | ✅ 完了 |
 
 #### エンドモルフィズムの仕組み
 
@@ -346,6 +344,7 @@ ncu --set full -o profile .\target\release\mocnpub-main.exe --gpu --prefix 0000 
 | **CPU 公開鍵プリコンピュート** | CPU がボトルネック、Occupancy 改善なし（3.09B → 844M）|
 | **SoA 最適化** | キャッシュミス多発、VRAM 消費大、batch_size を上げられない（3.09B → 2.70B）|
 | **`_PointMult` ブランチレス化** | アルゴリズム的に必要な分岐（ダブル＆アッド法のビット分岐 96.26%）、計算量 2 倍になるため見送り |
+| **`_Reduce512` ブランチレス化** | ダイバージェンス 99.16% を解消したが、実測で旧実装のほうが高速（3.20B vs 3.19B）→ 分岐予測が効いていた可能性 |
 
 #### レジスタ削減の実験（2025-11-29）
 
