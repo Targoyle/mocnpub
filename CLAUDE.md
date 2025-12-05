@@ -239,7 +239,8 @@
 | GPU + keys_per_thread 最適化（1408） | 2.63B keys/sec | 38,000x |
 | GPU + threads_per_block 最適化（128） | 2.80B keys/sec | 40,000x |
 | GPU + batch_size 最適化（1146880） | 3.09B keys/sec | 44,000x |
-| **GPU + ブランチレス化（_ModSub/_ModAdd）** | **3.16B keys/sec** | **45,143x** 🔥🔥🔥 |
+| GPU + ブランチレス化（_ModSub/_ModAdd） | 3.16B keys/sec | 45,143x |
+| **GPU + batch_size 再最適化（3584000）** | **3.24B keys/sec** | **46,286x** 🔥🔥🔥 |
 
 **8文字 prefix が約 10 秒で見つかる！** 🎉
 
@@ -332,7 +333,7 @@ ncu --set full -o profile .\target\release\mocnpub-main.exe --gpu --prefix 0000 
 | 1 | **keys_per_thread 固定化** | ビルド時に確定、ループアンローリング期待 | ✅ 完了 |
 | 2 | **MAX_KEYS_PER_THREAD を環境変数で指定** | `build.rs` で取得、nvcc に `-D` で渡す | ✅ 完了 |
 | 3 | **不要な引数の削除** | `--keys-per-thread` 等を廃止、シンプル化 | ✅ 完了 |
-| 4 | **batch_size 最終調整** | デフォルト値の見直し | ⬜ 未着手 |
+| 4 | **batch_size 最終調整** | 1146880 → 3584000（+1.2%）| ✅ 完了 |
 | 5 | **README 整備** | 使い方、ビルド方法、パフォーマンス情報 | ⬜ 未着手 |
 
 **実装方針**：

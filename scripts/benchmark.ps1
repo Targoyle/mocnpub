@@ -3,7 +3,7 @@
 #
 # 使い方:
 #   .\scripts\benchmark.ps1
-#   .\scripts\benchmark.ps1 -Seconds 120 -BatchSize 1146880
+#   .\scripts\benchmark.ps1 -Seconds 120 -BatchSize 3584000
 #   .\scripts\benchmark.ps1 -KeysPerThread 2048  # 再ビルドして実行
 #
 # KeysPerThread を変更すると、環境変数 MAX_KEYS_PER_THREAD を設定して
@@ -11,7 +11,7 @@
 
 param(
     [int]$Seconds = 120,
-    [int]$BatchSize = 1146880,
+    [int]$BatchSize = 3584000,
     [int]$ThreadsPerBlock = 128,
     [int]$KeysPerThread = 1408,
     [string]$Prefix = "00000000",

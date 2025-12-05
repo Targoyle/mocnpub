@@ -2,7 +2,7 @@
 
 **作成日**: 2025-11-14
 **最終更新**: 2025-12-05
-**進捗**: Step 0〜4 完了！🎉 3.16B keys/sec 達成！→ Step 5（完成度向上）進行中 🚀
+**進捗**: Step 0〜4 完了！🎉 3.24B keys/sec 達成！→ Step 5（完成度向上）進行中 🚀
 
 ---
 
@@ -32,7 +32,8 @@
 | GPU + keys_per_thread 最適化（1408） | 2.63B keys/sec | 38,000x |
 | GPU + threads_per_block 最適化（128） | 2.80B keys/sec | 40,000x |
 | GPU + batch_size 最適化（1146880） | 3.09B keys/sec | 44,000x |
-| **GPU + ブランチレス化（_ModSub/_ModAdd）** | **3.16B keys/sec** | **45,143x** 🔥🔥🔥 |
+| GPU + ブランチレス化（_ModSub/_ModAdd） | 3.16B keys/sec | 45,143x |
+| **GPU + batch_size 再最適化（3584000）** | **3.24B keys/sec** | **46,286x** 🔥🔥🔥 |
 
 **8文字 prefix が約 10 秒で見つかる！** 🎉
 
@@ -171,7 +172,7 @@ SoA（Structure of Arrays）最適化を実装：
 | 1 | keys_per_thread 固定化（ビルド時確定） | ✅ 完了 |
 | 2 | MAX_KEYS_PER_THREAD を環境変数で指定 | ✅ 完了 |
 | 3 | 不要な引数の削除（`--keys-per-thread` 等） | ✅ 完了 |
-| 4 | batch_size 最終調整 | ⬜ 未着手 |
+| 4 | batch_size 最終調整（3584000、+1.2%） | ✅ 完了 |
 | 5 | README 整備 | ⬜ 未着手 |
 
 ---
