@@ -1465,6 +1465,17 @@ extern "C" __global__ void generate_pubkeys_with_prefix_match(
     uint32_t max_matches
 )
 {
+    // === Load patterns and masks into shared memory for fast access ===
+    __shared__ uint64_t s_patterns[64];  // Support up to 64 prefixes
+    __shared__ uint64_t s_masks[64];
+
+    // Each thread loads one element (if within bounds)
+    if (threadIdx.x < num_prefixes && threadIdx.x < 64) {
+        s_patterns[threadIdx.x] = patterns[threadIdx.x];
+        s_masks[threadIdx.x] = masks[threadIdx.x];
+    }
+    __syncthreads();  // Wait for all threads to finish loading
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_threads) return;
 
@@ -1557,7 +1568,7 @@ extern "C" __global__ void generate_pubkeys_with_prefix_match(
             uint64_t x_upper = x_coords[endo][3];  // Most significant 64 bits
 
             for (uint32_t p = 0; p < num_prefixes; p++) {
-                if ((x_upper & masks[p]) == (patterns[p] & masks[p])) {
+                if ((x_upper & s_masks[p]) == (s_patterns[p] & s_masks[p])) {
                     // Match found! Atomically reserve output slot
                     uint32_t slot = atomicAdd(match_count, 1);
                     if (slot < max_matches) {
