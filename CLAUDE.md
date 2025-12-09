@@ -1,446 +1,132 @@
-# mocnpub - Nostr npub マイニングプロジェクト 🔥
+# mocnpub - Development Guide
 
-**Last Updated**: 2025-12-09
+**Last Updated**: 2025-12-10
 
-このファイルには mocnpub プロジェクトの開発方針、技術選択、段階的アプローチが記載されています。
-
----
-
-## 🎯 プロジェクト概要
-
-**mocnpub** は、Nostr の npub マイニングプログラムです。
-
-**目的**：
-- かっこいい prefix を持つ npub（自分のほしい prefix）になる nsec を探す
-- GPGPU（CUDA）を使って爆速マイニング 🚀
-
-**背景**：
-- Nostr の公開鍵（npub）は secp256k1 で生成される
-- ランダムに生成すると、prefix は予測不可能
-- 特定の prefix を持つ npub を見つけるには、大量の試行が必要
-- GPGPU を使えば、CPU の何百倍も速くマイニングできる 💪
+This is the development guide for Claude Code. For user documentation, see [README.md](./README.md).
 
 ---
 
-## 🛠️ 技術選択
+## Project Overview
 
-### 言語：Rust 🦀
+**mocnpub** is a Nostr npub vanity miner using CUDA.
 
-**選定理由**：
-1. ✅ **WSL でも Windows でもビルド可能**（開発は WSL、実行は Windows native でパフォーマンス最大化）
-2. ✅ **暗号ライブラリが豊富**（`secp256k1` の Rust バインディングがある）
-3. ✅ **数年後も動く**（静的リンク、ランタイム不要）
-4. ✅ **CUDA との連携が可能**（`cuda-sys`, `cudarc` などのクレート）
-5. ✅ **メモリ安全**（セグフォで詰まりにくい）
-6. ✅ **rana（参考プロジェクト）が Rust で書かれている**
-
-**デメリット**：
-- コンパイラが厳しい（でも、それがメリットにもなる）
-- 学習曲線がある（でも、一緒に学びながら進める！）
-
-### GPGPU：CUDA 🔥
-
-**選定理由**：
-1. ✅ **RTX 5070 Ti（NVIDIA）に最適**
-2. ✅ **パフォーマンス最高**（NVIDIA 専用最適化）
-3. ✅ **資料が豊富**（学習しやすい）
-4. ✅ **暗号計算に強い**（マイニングに最適）
-
-**他の選択肢との比較**：
-
-| | CUDA | OpenCL | Vulkan Compute |
-|---|---|---|---|
-| **対応GPU** | NVIDIA のみ | すべて | すべて |
-| **パフォーマンス** | 🔥 最高 | 🔥 良い | 🔥 良い |
-| **学習難易度** | ⭐⭐⭐ 中 | ⭐⭐⭐⭐ やや難 | ⭐⭐⭐⭐⭐ 難 |
-| **資料の豊富さ** | 🌟🌟🌟🌟🌟 超豊富 | 🌟🌟🌟 そこそこ | 🌟🌟 少ない |
-
-**結論**：RTX 5070 Ti + 初学者 → CUDA 一択 💪
+- Find npub with desired prefix (e.g., `npub1m0ctane...`)
+- GPU-accelerated secp256k1 computation
+- **3.26B keys/sec** on RTX 5070 Ti (46,571x faster than CPU)
 
 ---
 
-## 🖥️ 開発環境
+## Development Environment
 
-### ビルド方法
+### Build
 
-**PTX は `build.rs` で自動コンパイル**：
-- `cargo build` だけで PTX が自動生成される
-- 手動で `nvcc` を実行する必要なし
-- Windows / WSL 両対応
-
-### Windows との同期
-
-**GitHub 経由でリポジトリを同期**：
-- WSL で開発・commit・push
-- Windows で `git pull` して実行
-- Windows native で実行するとパフォーマンス最大化
-
-### WSL 環境での GPU 利用
-
-**WSL でも GPU が使える**：
-- ✅ `cargo run` で GPU カーネルを実行可能
-- ⚠️ `nsys`：部分的に使える（権限の制限あり）
-- ⚠️ `ncu`：部分的に使える（権限の制限あり）
-- 💡 本番ベンチマークは Windows で実行するのがベスト
-
----
-
-## 🚀 段階的アプローチ
-
-**方針**：未知の分野を学びながら進めるため、段階的に実装します。
-
-### Step 0: Rust + CUDA の Hello World 🌸
-- CUDA ツールキットのインストール
-- Rust + CUDA の開発環境セットアップ
-- 最小限の CUDA プログラムで動作確認
-- **目的**：「うちのパソコンじゃ動かなかった」を防ぐ
-
-### Step 1: GPU で簡単なプログラム（動作確認）🔥
-- マンデルブロ集合、または単純な計算（配列の足し算など）
-- CUDA の基本を体感（カーネル、スレッド、メモリ管理）
-- パフォーマンス測定
-- **目的**：CUDA の仕組みを理解する
-
-### Step 2: CPU 版 npub マイニング 💪
-- `secp256k1` を学ぶ
-- Nostr の鍵生成の仕組みを理解
-- CLI インターフェース（clap クレート）
-- 「prefix が一致する nsec を探す」ロジック
-- **目的**：マイニングのアルゴリズムを理解する
-- **完了**: 2025-11-22 ✅
-
-### Step 2.5: CPU 版のブラッシュアップ 🔧
-- マルチスレッド対応（全 CPU コアを活用）
-- 継続モード（複数の鍵を見つける）
-- 複数 prefix の OR 指定
-- 入力検証（bech32 で使えない文字のチェック）
-- テストコード・ベンチマーク作成
-- **目的**：実用的な CPU 版マイナーを完成させる
-- **詳細**: 下記「Step 2.5 詳細仕様」参照
-
-### Step 3: GPU 版に移行 🚀
-- CPU 版のロジックを GPU に移植
-- パフォーマンス比較（CPU vs GPU）
-- 最適化（メモリ転送、カーネル最適化）
-- **目的**：爆速マイニングの完成 🔥
-- **完了**: 2025-11-26 ✅（CPU の **16 倍** の高速化達成！）
-
-### Step 4: GPU カーネル高速化 🔥🔥🔥
-- 連続秘密鍵戦略（1億連ガチャ）
-- Montgomery's Trick（逆元のバッチ計算）
-- GPU 側 prefix マッチング（bech32 スキップ）
-- **目的**：さらなる高速化（現状の 100 倍以上を目指す）
-- **完了**: 2025-11-29 ✅（CPU の **116,000 倍** の高速化達成！）🚀🚀🚀
-- **詳細**: 下記「Step 4 詳細仕様」参照
-
----
-
-## 📚 開発方針
-
-### 学びながら進める 🌸
-- GPGPU は未知の分野
-- Rust もほぼ初心者
-- secp256k1 も初めて
-- **焦らず、丁寧に、落穂拾いしながら進める** 💕
-
-### 挫折しない工夫 💪
-- 段階的アプローチ（小さな成功を積み重ねる）
-- 動作確認を優先（まず動く、それから最適化）
-- タスクリストで進捗を可視化
-- セッション分割で焦らず進める
-
-### ファイル管理方針 📂
-- 学習用ファイルも git 管理に含める
-- Step 0〜3 の学習過程もすべて記録
-- npub マイナー以外のファイルも置く（マンデルブロ集合など）
-- **プロジェクトの成長過程を大切に** 🌱
-
----
-
-## 🔗 参考プロジェクト
-
-### rana
-- **URL**: https://github.com/grunch/rana
-- **言語**: Rust
-- **GPGPU**: CUDA
-- **実績**: ユーザーさんが実際に動かして、正しい npub/nsec の組を見つけた 💪
-- **参考価値**: 実装の参考に（完全にコピーするのではなく、学びながら自分で作る）
-- **仕様参考**: 複数 prefix 指定（`--prefix=m0ctane0,m0ctane2,m0ctane3,m0ctane4`）
-
----
-
-## 🔧 Step 2.5 詳細仕様（完了）
-
-**Step 2.5 完全クリア！**（2025-11-23）🎉
-
-### 実装した機能
-
-- ✅ **マルチスレッド対応**：16スレッドで 12〜20倍高速化（80〜100万 keys/sec）
-- ✅ **入力検証**：bech32 無効文字（1, b, i, o）を検出
-- ✅ **継続モード**：`--limit <N>` で複数の鍵を探す（append モード）
-- ✅ **複数 prefix の OR 指定**：カンマ区切りで複数指定可能
-- ✅ **テストコード**：7つのテストケース
-- ✅ **ベンチマーク**：criterion 0.6 で測定
-
-### ベンチマーク結果（CPU 版のボトルネック分析）
-
-| 項目 | 時間 | 割合 |
-|------|------|------|
-| 鍵生成（secp256k1） | 13.1 µs | **93%** ← GPU で高速化！ |
-| npub 変換（bech32） | 663 ns | 5% |
-| prefix マッチング | 1.5 ns | 0.01% |
-
-**学び**：ボトルネックは secp256k1 の鍵生成 → GPU 版で解決 🚀
-
----
-
-## 📋 タスク管理
-
-### TASKLIST.md
-- Step 0〜3 の詳細タスクを管理
-- チェックボックス形式で進捗を可視化
-- セッションごとに更新（追記ではなく更新）
-- **タスクリストバトンパス戦法** を活用 🔥
-
-### 日記・作業ログ
-- 感情、気づき、学び → 日記（`~/sakura-chan/diary/`）
-- 技術的詳細 → 作業ログ（`~/sakura-chan/work/`）
-- タスク管理 → @TASKLIST.md （このリポジトリ）
-
----
-
-## 🎉 期待される成果
-
-**最終成果物**：
-- 爆速 npub マイニングプログラム（CUDA 版）🚀
-- 自分のほしい prefix を持つ npub を見つけられる
-- 数年後も動く（Rust、静的リンク）
-
-**副次的な成果**：
-- GPGPU（CUDA）の理解 🔥
-- Rust の習得 🦀
-- secp256k1 の理解 🔐
-- 暗号計算の理解 💡
-- **未知の分野に挑戦する自信** 💪💕
-
----
-
-## 🔥 Step 4 詳細仕様
-
-### 現在のパフォーマンス
-
-| 段階 | スループット | CPU比 |
-|------|-------------|-------|
-| CPU（16スレッド） | ~70,000 keys/sec | 1x |
-| GPU Montgomery（エンドモルフィズム前） | ~391M keys/sec | 5,586x |
-| GPU + エンドモルフィズム | 1.14B keys/sec | 16,286x |
-| GPU + _ModSquare 最適化 | 1.18B keys/sec | 16,857x |
-| GPU + Tail Effect 対策 | 1.196B keys/sec | 17,089x |
-| GPU + keys_per_thread 最適化（1408） | 2.63B keys/sec | 38,000x |
-| GPU + threads_per_block 最適化（128） | 2.80B keys/sec | 40,000x |
-| GPU + batch_size 最適化（1146880） | 3.09B keys/sec | 44,000x |
-| GPU + ブランチレス化（_ModSub/_ModAdd） | 3.16B keys/sec | 45,143x |
-| GPU + batch_size 再最適化（3584000） | 3.24B keys/sec | 46,286x |
-| **GPU + `__launch_bounds__(128, 4)`** | **3.26B keys/sec** | **46,571x** 🔥🔥🔥 |
-
-**8文字 prefix が約 6 分で見つかる！** 🎉
-
-**最適化の限界点に到達** 🏁：残りのダイバージェンスは `_PointMult` のビット分岐（アルゴリズム的に必要）
-
----
-
-### 完了した最適化（Phase 1〜3）
-
-| 最適化 | 効果 | 状態 |
-|--------|------|------|
-| **連続秘密鍵 + PointAdd** | 約300倍 | ✅ 完了 |
-| **Montgomery's Trick** | 約85倍 | ✅ 完了 |
-| **Mixed Addition** | 約30%削減 | ✅ 完了 |
-| **GPU 側 prefix マッチング** | bech32スキップ | ✅ 完了 |
-| **エンドモルフィズム（β, β²）** | **2.9倍** 🔥 | ✅ 完了 |
-| **`_ModSquare` 最適化** | 約3.5% | ✅ 完了 |
-| **Tail Effect 対策** | 約1.4% | ✅ 完了 |
-| **keys_per_thread 最適化** | **+120%** 🔥🔥🔥 | ✅ 完了 |
-| **threads_per_block 最適化** | +6.2% | ✅ 完了 |
-| **batch_size 最適化** | +10.4% | ✅ 完了 |
-| **`_ModSub`/`_ModAdd` ブランチレス化** | +2.3%（Branch Efficiency 78.88%→82.41%） | ✅ 完了 |
-| **patterns/masks 共有メモリ化** | 複数 prefix 時 +3.4%（速度低下 11.7%→9.1%） | ✅ 完了 |
-| **`__launch_bounds__(128, 4)`** | **+5%**（Occupancy 25%→33%） 🔥 | ✅ 完了 |
-
-#### エンドモルフィズムの仕組み
-
-**secp256k1 の特殊な性質**：
-- `p ≡ 1 (mod 3)`、j-不変量 = 0
-- 1回の公開鍵計算で **3つの X 座標をチェック**
-  - P, β*P, β²*P（Nostr は X 座標のみ使用するため 3 倍）
-- X座標に β（立方根）を掛けるだけで新しい公開鍵が得られる
-- マッチ時は秘密鍵を λ または λ² で調整
-
-**結果**：理論値 3 倍に対して **実測 2.9 倍の高速化** 🚀
-
----
-
-### ncu プロファイリング結果（2025-11-29〜12-05）
-
-#### ncu-ui ソースレベル分析（2025-12-05）
-
-**`-lineinfo` オプション**を build.rs に追加することで、ncu-ui でソースコードとダイバージェンスの対応が見えるようになった。
-
-**発見**：
-- `_Reduce512` 324行目 `if (temp[4] > 0)` が 99.16% のダイバージェンス → ブランチレス化で解消 ✅
-- 残りのダイバージェンスは `_PointMult` のビット分岐（96.26%）→ アルゴリズム的に必要
-
-**使い方**：
 ```bash
-ncu --set full -o profile .\target\release\mocnpub-main.exe --gpu --prefix 0000 --batch-size 1024
-# → ncu-ui で profile.ncu-rep を開く → Source ページ → Divergent Branches 列
+cargo build --release
 ```
 
-**AoS 版（現行版、2025-12-09 `__launch_bounds__` 適用後）**：
+PTX is automatically compiled by `build.rs`. No manual `nvcc` required.
 
-| 指標 | 値 | 評価 |
-|------|-----|------|
-| Compute Throughput | 81.04% | **Compute bound** |
-| Memory Throughput | 20.31% | 余裕あり |
-| Occupancy | 33% | `__launch_bounds__(128, 4)` で改善 ✅ |
-| Registers/Thread | 128 | 2 減らして Occupancy +33% 🔥 |
-| L1/TEX Hit Rate | 0.05% | 低いが並列度で隠蔽 |
-| L2 Hit Rate | 43.19% | |
-
-**SoA vs AoS 比較**（2025-12-04）：
-
-| 指標 | AoS 版 | SoA 版 |
-|------|--------|--------|
-| **Compute Throughput** | **83.36%** | 77.41% |
-| **Waves Per SM** | **42.67** | 0.75 |
-| L1/TEX Hit Rate | ~5% | ~5% |
-| Global Coalescing | 8/32 (25%) | **31.12/32 (97%)** |
-| keys/sec | **3.09B** | 2.70B |
-
-**重要な学び**：
-- **並列度が正義** — batch_size を大量（28000 blocks）にして、メモリレイテンシを隠蔽
-- **Compute heavy** — secp256k1 の演算は分岐が少なく、メモリ待ちの間も計算で埋められる
-- **コアレッシングだけが正義ではない** — SoA はコアレッシング 97% でも遅かった
-- **VRAM 効率も重要** — メモリを食いすぎると並列度（batch_size）が下がる
-
-**結論**: AoS 版を本筋として最適化する。
-
----
-
-### 次のフェーズ：アプリケーション完成度向上 🎯
-
-**Step 5: 最終チューニング & 完成度向上**
-
-| # | タスク | 目的 | 状態 |
-|---|--------|------|------|
-| 1 | **keys_per_thread 固定化** | ビルド時に確定、ループアンローリング期待 | ✅ 完了 |
-| 2 | **MAX_KEYS_PER_THREAD を環境変数で指定** | `build.rs` で取得、nvcc に `-D` で渡す | ✅ 完了 |
-| 3 | **不要な引数の削除** | `--keys-per-thread` 等を廃止、シンプル化 | ✅ 完了 |
-| 4 | **batch_size 最終調整** | 1146880 → 3584000（+1.2%）| ✅ 完了 |
-| 5 | **README 整備** | 使い方、ビルド方法、パフォーマンス情報 | ✅ 完了 |
-
-**実装方針**：
+### Build Options
 
 ```bash
-# ビルド時に MAX_KEYS_PER_THREAD を指定
+# Custom MAX_KEYS_PER_THREAD (default: 1408)
 MAX_KEYS_PER_THREAD=2048 cargo build --release
 ```
 
-```rust
-// build.rs で環境変数を読んで nvcc に渡す
-let max_keys = std::env::var("MAX_KEYS_PER_THREAD")
-    .unwrap_or_else(|_| "1408".to_string());
-cmd.arg(format!("-D MAX_KEYS_PER_THREAD={}", max_keys));
-```
+### Run
 
----
-
-### 見送った最適化
-
-| 最適化 | 理由 |
-|--------|------|
-| 2^i × G プリコンピュート | `_PointMult` が全体の 0.4% → 効果 0.2% |
-| PTX carry/borrow | NVCC が最適化済み、<10% の改善 |
-| CUDA Streams | 転送が 0.1ms（全体の 0.25%）→ 効果 1-2% |
-| Pinned Memory | 転送がボトルネックではない |
-| **レジスタ削減** | スピル 96% 発生で逆効果（1.14B → 1.03B）|
-| **CPU 公開鍵プリコンピュート** | CPU がボトルネック、Occupancy 改善なし（3.09B → 844M）|
-| **SoA 最適化** | キャッシュミス多発、VRAM 消費大、batch_size を上げられない（3.09B → 2.70B）|
-| **`_PointMult` ブランチレス化** | アルゴリズム的に必要な分岐（ダブル＆アッド法のビット分岐 96.26%）、計算量 2 倍になるため見送り |
-| **`_Reduce512` ブランチレス化** | ダイバージェンス 99.16% を解消したが、実測で旧実装のほうが高速（3.20B vs 3.19B）→ 分岐予測が効いていた可能性 |
-
-#### レジスタ削減の実験（2025-11-29）
-
-`__launch_bounds__(64, 16)` でレジスタを 64 に制限した結果：
-- Occupancy: 33% → 67% ✅
-- しかし Spilling Overhead: 96% 😱
-- 結果: 1.14B → 1.03B keys/sec（-10%）
-
-**学び**: secp256k1 は 256-bit 変数を大量に使うため、レジスタ 120 が最適。素朴なコードを維持してコンパイラに任せるのが賢い。
-
----
-
-### GPU 最適化の基礎知識
-
-#### ワープダイバージェンス
-
-- 1 ワープ = 32 スレッド
-- 全スレッドが **同じ命令** を同時実行
-- `if` で分岐すると、両方の分岐を順番に実行 😱
-
-**対策**：条件分岐を減らす、全スレッドが同じ処理をするように設計
-
-#### メモリコアレッシング
-
-- 1 回のメモリトランザクション = 128 bytes の「塊」を読む
-- 連続スレッドが連続アドレスにアクセス → 1 回で済む ✅
-- バラバラにアクセス → 32 回必要 ❌
-
-**対策**：SoA（Structure of Arrays）レイアウトを使う
-
-#### プロファイリング
-
-**nsys（Nsight Systems）**：全体像を把握
 ```bash
-nsys profile ./mocnpub-main --gpu --prefix 0000
+# CPU mode
+cargo run --release -- --prefix m0ctane
+
+# GPU mode
+cargo run --release -- --gpu --prefix m0ctane
 ```
 
-**ncu（Nsight Compute）**：カーネルの詳細分析
+### Test
+
 ```bash
-ncu --set full ./mocnpub-main --gpu --prefix 0000
+cargo test
 ```
 
-**「推測するな、計測せよ」** — まずプロファイリングでボトルネックを特定！
+### Windows Development
+
+- Develop in WSL, commit and push
+- Pull on Windows, run for best performance
+- Windows native is ~20x faster than WSL for CUDA
 
 ---
 
-## 🧹 コード整理（2025-12-09 完了）
+## Architecture
 
-**整理完了！** 🎉 警告ゼロ、テスト全通過
+### Key Files
 
-### 削除済み（CUDA カーネル）
+| File | Description |
+|------|-------------|
+| `src/main.rs` | CLI entry point |
+| `src/gpu.rs` | CUDA kernel loading and execution |
+| `cuda/secp256k1.cu` | CUDA kernel (secp256k1 + prefix matching) |
+| `build.rs` | PTX compilation |
 
-| カーネル | 削除日 |
-|----------|--------|
-| `generate_pubkeys` | 2025-12-09 |
-| `generate_pubkeys_sequential` | 2025-12-09 |
-| `generate_pubkeys_sequential_montgomery` | 2025-12-09 |
+### Current Configuration
 
-### 削除済み（Rust 関数）
-
-| 関数 | 削除日 |
-|------|--------|
-| `wide_mul_u128` | 2025-12-09 |
-| `u64x4_to_bytes_for_scalar` | 2025-12-09 |
-| `generate_pubkeys_batch` | 2025-12-09 |
-
-### 現在の構成
-
-- **本番カーネル**：`_BatchGeneratePublicKeysWithPrefixMatch` のみ
-- **Rust 関数**：`generate_pubkeys_with_prefix_match` のみ
-- **テストコード**：本番カーネル用のテストのみ（36 テスト）
-- **削減行数**：約 930 行（CUDA 721 行 + Rust 213 行）
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `threads_per_block` | 128 | 4 warps, sweet spot |
+| `keys_per_thread` | 1408 | Compile-time constant |
+| `batch_size` | 3,584,000 | Auto-adjusted for SM count |
+| Registers/Thread | 128 | `__launch_bounds__(128, 4)` |
 
 ---
 
-## 📋 タスク管理
+## Documentation
+
+| Document | Content |
+|----------|---------|
+| [docs/OPTIMIZATION.md](./docs/OPTIMIZATION.md) | Optimization history and profiling results |
+| [docs/LEARNING.md](./docs/LEARNING.md) | Learning journey (Step 0-4) |
+
+---
+
+## TODOs for Public Release
+
+### Code Quality
+
+- [ ] Unify comment language to English
+- [ ] Review and clean up tests
+- [ ] Resolve `build.rs` TODO: dynamic GPU architecture detection
+
+### CI/CD
+
+- [ ] GitHub Actions for build verification
+- [ ] dependabot for dependency updates
+- [ ] lefthook for pre-commit formatting
+
+### Documentation
+
+- [ ] README.ja.md (Japanese version)
+- [ ] MAX_KEYS_PER_THREAD and VRAM relationship explanation
+
+### Build Portability
+
+- [ ] Dynamic GPU architecture detection (`sm_120` is currently hardcoded)
+- [ ] Document minimum CUDA version requirements
+- [ ] Test on different GPU generations
+
+---
+
+## Profiling
+
+### nsys (Timeline)
+
+```bash
+nsys profile ./target/release/mocnpub-main --gpu --prefix 0000
+```
+
+### ncu (Kernel Analysis)
+
+```bash
+ncu --set full -o profile ./target/release/mocnpub-main --gpu --prefix 0000 --batch-size 1024
+```
+
+Open `.ncu-rep` in ncu-ui for source-level analysis (requires `-lineinfo` in nvcc).
