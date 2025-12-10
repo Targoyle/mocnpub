@@ -1,5 +1,7 @@
+// Allow C-style loops for 256-bit arithmetic (0..4 is clearer for limb operations)
+#![allow(clippy::needless_range_loop)]
+
 use bech32::{Bech32, Hrp, encode};
-use hex;
 use secp256k1::{PublicKey, SecretKey};
 
 // GPU module

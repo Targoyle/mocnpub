@@ -52,7 +52,7 @@ pub fn calculate_optimal_batch_size(
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let sm_count = get_sm_count(ctx)?;
     let threads_per_wave = (sm_count * threads_per_block) as usize;
-    let waves = (desired_batch_size + threads_per_wave - 1) / threads_per_wave;
+    let waves = desired_batch_size.div_ceil(threads_per_wave);
     Ok(waves * threads_per_wave)
 }
 
@@ -477,7 +477,7 @@ pub fn generate_pubkeys_with_prefix_match(
     stream.memcpy_htod(&masks, &mut masks_dev)?;
 
     // Calculate grid and block dimensions (threads_per_block is now a parameter)
-    let num_blocks = (num_threads as u32 + threads_per_block - 1) / threads_per_block;
+    let num_blocks = (num_threads as u32).div_ceil(threads_per_block);
 
     let config = LaunchConfig {
         grid_dim: (num_blocks, 1, 1),
