@@ -22,6 +22,12 @@ fn main() {
     println!("cargo:rustc-env=MAX_KEYS_PER_THREAD={}", max_keys_per_thread);
     println!("cargo:warning=MAX_KEYS_PER_THREAD={}", max_keys_per_thread);
 
+    // Detect GPU architecture
+    // Rebuild when CUDA_ARCH env var changes
+    println!("cargo:rerun-if-env-changed=CUDA_ARCH");
+    let arch = detect_gpu_arch();
+    println!("cargo:warning=Using GPU architecture: {}", arch);
+
     // Find nvcc
     let nvcc = find_nvcc().expect(
         "Could not find nvcc. Please ensure CUDA Toolkit is installed and either:\n\
@@ -32,13 +38,13 @@ fn main() {
     println!("cargo:warning=Using nvcc: {}", nvcc.display());
 
     // Compile secp256k1.cu to PTX
-    compile_cu_to_ptx(&nvcc, &cuda_dir.join("secp256k1.cu"), &out_dir, &max_keys_per_thread);
+    compile_cu_to_ptx(&nvcc, &cuda_dir.join("secp256k1.cu"), &out_dir, &max_keys_per_thread, &arch);
 
     // Compile mandelbrot.cu to PTX (in root directory)
-    compile_cu_to_ptx(&nvcc, &manifest_dir.join("mandelbrot.cu"), &out_dir, &max_keys_per_thread);
+    compile_cu_to_ptx(&nvcc, &manifest_dir.join("mandelbrot.cu"), &out_dir, &max_keys_per_thread, &arch);
 }
 
-fn compile_cu_to_ptx(nvcc: &PathBuf, cu_file: &PathBuf, out_dir: &PathBuf, max_keys_per_thread: &str) {
+fn compile_cu_to_ptx(nvcc: &PathBuf, cu_file: &PathBuf, out_dir: &PathBuf, max_keys_per_thread: &str, arch: &str) {
     let file_stem = cu_file.file_stem().unwrap().to_str().unwrap();
     let ptx_file = out_dir.join(format!("{}.ptx", file_stem));
 
@@ -54,17 +60,11 @@ fn compile_cu_to_ptx(nvcc: &PathBuf, cu_file: &PathBuf, out_dir: &PathBuf, max_k
     }
 
     println!(
-        "cargo:warning=Compiling {} -> {}",
+        "cargo:warning=Compiling {} -> {} (arch={})",
         cu_file.display(),
-        ptx_file.display()
+        ptx_file.display(),
+        arch
     );
-
-    // TODO: Dynamically detect GPU architecture in the future
-    // Currently assumes RTX 5070 Ti (Blackwell, sm_120)
-    // PTX is forward-compatible, so older architecture PTX will be
-    // JIT-compiled to appropriate architecture at runtime
-    // Note: CUDA 13.0 minimum supported architecture is sm_75 (Turing)
-    let arch = "sm_120"; // Blackwell (RTX 50 series)
 
     // Add UTF-8 option for cl.exe on Windows
     let mut args = vec![
@@ -164,4 +164,66 @@ fn nvcc_executable() -> &'static str {
     } else {
         "nvcc"
     }
+}
+
+/// Detect GPU architecture for PTX compilation
+///
+/// Priority:
+/// 1. CUDA_ARCH environment variable (e.g., "sm_86", "sm_120")
+/// 2. Auto-detect via nvidia-smi
+/// 3. Fallback to sm_75 (Turing, minimum supported by CUDA 13.0)
+fn detect_gpu_arch() -> String {
+    // 1. Check CUDA_ARCH environment variable
+    if let Ok(arch) = env::var("CUDA_ARCH") {
+        println!("cargo:warning=GPU arch from CUDA_ARCH env: {}", arch);
+        return arch;
+    }
+
+    // 2. Try to detect via nvidia-smi
+    if let Some(arch) = detect_gpu_arch_nvidia_smi() {
+        println!("cargo:warning=GPU arch auto-detected via nvidia-smi: {}", arch);
+        return arch;
+    }
+
+    // 3. Fallback to sm_75 (Turing)
+    // PTX is forward-compatible, so this will work on newer GPUs via JIT
+    println!("cargo:warning=GPU arch fallback to sm_75 (Turing)");
+    "sm_75".to_string()
+}
+
+/// Detect GPU compute capability via nvidia-smi
+///
+/// nvidia-smi --query-gpu=compute_cap --format=csv,noheader
+/// Returns e.g., "8.6" for RTX 3080, "12.0" for RTX 5070 Ti
+fn detect_gpu_arch_nvidia_smi() -> Option<String> {
+    let output = Command::new("nvidia-smi")
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let compute_cap = stdout.lines().next()?.trim();
+
+    // Convert "8.6" -> "sm_86", "12.0" -> "sm_120"
+    let arch = compute_cap_to_sm(compute_cap)?;
+    Some(arch)
+}
+
+/// Convert compute capability string to sm_XX format
+/// e.g., "8.6" -> "sm_86", "12.0" -> "sm_120"
+fn compute_cap_to_sm(compute_cap: &str) -> Option<String> {
+    let parts: Vec<&str> = compute_cap.split('.').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+
+    let major: u32 = parts[0].parse().ok()?;
+    let minor: u32 = parts[1].parse().ok()?;
+
+    // sm_XY where X is major, Y is minor
+    Some(format!("sm_{}{}", major, minor))
 }
