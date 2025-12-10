@@ -9,9 +9,9 @@ use mocnpub_main::gpu::{
     test_mod_square_gpu, test_mod_mult_gpu,
 };
 
-/// ベンチマーク: 鍵生成のパフォーマンス
+/// Benchmark: Key generation performance
 ///
-/// secp256k1 の鍵生成がどれくらい速いかを測定
+/// Measures secp256k1 keypair generation speed
 fn bench_keypair_generation(c: &mut Criterion) {
     let secp = Secp256k1::new();
 
@@ -23,9 +23,9 @@ fn bench_keypair_generation(c: &mut Criterion) {
     });
 }
 
-/// ベンチマーク: 公開鍵を npub に変換
+/// Benchmark: Public key to npub conversion
 ///
-/// bech32 エンコードのパフォーマンスを測定
+/// Measures bech32 encoding performance
 fn bench_pubkey_to_npub(c: &mut Criterion) {
     let secp = Secp256k1::new();
     let (_sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
@@ -38,9 +38,9 @@ fn bench_pubkey_to_npub(c: &mut Criterion) {
     });
 }
 
-/// ベンチマーク: 秘密鍵を nsec に変換
+/// Benchmark: Secret key to nsec conversion
 ///
-/// bech32 エンコードのパフォーマンスを測定
+/// Measures bech32 encoding performance
 fn bench_seckey_to_nsec(c: &mut Criterion) {
     let secp = Secp256k1::new();
     let (sk, _pk) = secp.generate_keypair(&mut rand::thread_rng());
@@ -53,14 +53,14 @@ fn bench_seckey_to_nsec(c: &mut Criterion) {
     });
 }
 
-/// ベンチマーク: prefix マッチング
+/// Benchmark: Prefix matching
 ///
-/// npub の prefix マッチングのパフォーマンスを測定
+/// Measures npub prefix matching performance
 fn bench_prefix_matching(c: &mut Criterion) {
     let secp = Secp256k1::new();
     let (_sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
     let npub = pubkey_to_npub(&pk);
-    let npub_body = &npub[5..]; // "npub1" を除去
+    let npub_body = &npub[5..]; // Remove "npub1"
     let prefix = "test";
 
     c.bench_function("prefix_matching", |b| {
@@ -71,9 +71,9 @@ fn bench_prefix_matching(c: &mut Criterion) {
     });
 }
 
-/// ベンチマーク: prefix 検証
+/// Benchmark: Prefix validation
 ///
-/// validate_prefix() のパフォーマンスを測定
+/// Measures validate_prefix() performance
 fn bench_validate_prefix(c: &mut Criterion) {
     let prefix = "m0ctane";
 
@@ -85,10 +85,10 @@ fn bench_validate_prefix(c: &mut Criterion) {
     });
 }
 
-/// ベンチマーク: 完全なマイニングサイクル
+/// Benchmark: Complete mining cycle
 ///
-/// 鍵生成 → npub 変換 → prefix マッチングの一連の流れを測定
-/// （実際のマイニングループに近い）
+/// Measures the full flow: key generation → npub conversion → prefix matching
+/// (Similar to the actual mining loop)
 fn bench_mining_cycle(c: &mut Criterion) {
     let secp = Secp256k1::new();
     let prefix = "test";
@@ -108,27 +108,27 @@ fn bench_mining_cycle(c: &mut Criterion) {
 // GPU Benchmarks
 // ============================================================================
 
-/// GPU ベンチマーク: Batch vs Sequential vs Montgomery
+/// GPU Benchmark: Batch vs Sequential vs Montgomery
 ///
-/// 3つの方式を同じ条件で比較
+/// Compares three methods under the same conditions
 fn bench_gpu_methods(c: &mut Criterion) {
     let ctx = init_gpu().expect("Failed to initialize GPU");
 
     let mut group = c.benchmark_group("gpu_methods");
 
-    // テスト設定: (num_threads, keys_per_thread)
+    // Test configurations: (num_threads, keys_per_thread)
     let configs = [
-        // 小規模（ウォームアップ用）
+        // Small scale (warm-up)
         (256, 64),    // 16,384 keys
         (256, 256),   // 65,536 keys
-        // 中規模
+        // Medium scale
         (1024, 64),   // 65,536 keys
         (1024, 256),  // 262,144 keys
         (1024, 1024), // 1,048,576 keys (1M keys!)
-        // 大規模（10000連ガチャ！）
+        // Large scale (10000 consecutive keys!)
         (1024, 4096),  // 4,194,304 keys (4M keys!)
         (1024, 10000), // 10,240,000 keys (10M keys!) 🔥
-        // スレッド数を増やす
+        // Increase thread count
         (2048, 256),  // 524,288 keys
         (2048, 1024), // 2,097,152 keys (2M keys!)
         (4096, 256),  // 1,048,576 keys (1M keys!)
@@ -137,12 +137,12 @@ fn bench_gpu_methods(c: &mut Criterion) {
     for (num_threads, keys_per_thread) in configs {
         let total_keys = num_threads * keys_per_thread;
 
-        // Batch 用のキー準備
+        // Prepare keys for Batch
         let batch_keys: Vec<[u64; 4]> = (2..(2 + total_keys as u64))
             .map(|k| [k, 0, 0, 0])
             .collect();
 
-        // Sequential/Montgomery 用のベースキー準備
+        // Prepare base keys for Sequential/Montgomery
         let base_keys: Vec<[u64; 4]> = (0..num_threads)
             .map(|i| [2 + (i * keys_per_thread) as u64, 0, 0, 0])
             .collect();
@@ -186,16 +186,16 @@ fn bench_gpu_methods(c: &mut Criterion) {
     group.finish();
 }
 
-/// GPU ベンチマーク: keys_per_thread の影響を調べる
+/// GPU Benchmark: Investigate keys_per_thread impact
 ///
-/// Montgomery's Trick の効果が keys_per_thread でどう変わるか
+/// How Montgomery's Trick effectiveness changes with keys_per_thread
 fn bench_gpu_keys_per_thread(c: &mut Criterion) {
     let ctx = init_gpu().expect("Failed to initialize GPU");
 
     let mut group = c.benchmark_group("gpu_keys_per_thread");
 
-    let num_threads = 1024;  // より実用的なスレッド数
-    // 10000連 → 1億連まで！どこまでスケールするか？
+    let num_threads = 1024;  // More practical thread count
+    // 10K → 100K consecutive keys! How far can it scale?
     let keys_per_thread_options = [10000, 20000, 50000, 100000];
 
     for keys_per_thread in keys_per_thread_options {
@@ -220,15 +220,15 @@ fn bench_gpu_keys_per_thread(c: &mut Criterion) {
     group.finish();
 }
 
-/// GPU ベンチマーク: _ModSquare vs _ModMult
+/// GPU Benchmark: _ModSquare vs _ModMult
 ///
-/// 2乗（a²）と乗算（a*a）の速度を比較
+/// Compare squaring (a²) vs multiplication (a*a) speed
 fn bench_mod_square_vs_mult(c: &mut Criterion) {
     let ctx = init_gpu().expect("Failed to initialize GPU");
 
     let mut group = c.benchmark_group("mod_square_vs_mult");
 
-    // テスト値: 適度に大きな値
+    // Test value: moderately large number
     let a = [0x123456789ABCDEFu64, 0xFEDCBA9876543210u64, 0x1111111111111111u64, 0x2222222222222222u64];
 
     // _ModSquare: a²

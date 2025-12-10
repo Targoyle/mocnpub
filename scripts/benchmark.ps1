@@ -1,13 +1,13 @@
-# mocnpub ベンチマークスクリプト
-# 指定した秒数だけ実行して、keys/sec を取得する
+# mocnpub Benchmark Script
+# Runs for a specified number of seconds and measures keys/sec
 #
-# 使い方:
+# Usage:
 #   .\scripts\benchmark.ps1
 #   .\scripts\benchmark.ps1 -Seconds 120 -BatchSize 3584000
-#   .\scripts\benchmark.ps1 -KeysPerThread 2048  # 再ビルドして実行
+#   .\scripts\benchmark.ps1 -KeysPerThread 2048  # Rebuild and run
 #
-# KeysPerThread を変更すると、環境変数 MAX_KEYS_PER_THREAD を設定して
-# cargo build --release を実行してから benchmark を開始します。
+# When KeysPerThread is changed, it sets the MAX_KEYS_PER_THREAD environment
+# variable and runs cargo build --release before starting the benchmark.
 
 param(
     [int]$Seconds = 120,
@@ -31,7 +31,7 @@ Write-Host "  Duration:         $Seconds sec"
 Write-Host "  Prefix:           $Prefix"
 Write-Host ""
 
-# ビルド（-SkipBuild が指定されていない場合）
+# Build (unless -SkipBuild is specified)
 if (-not $SkipBuild) {
     Write-Host "Building with MAX_KEYS_PER_THREAD=$KeysPerThread..." -ForegroundColor Yellow
     $env:MAX_KEYS_PER_THREAD = $KeysPerThread
@@ -55,7 +55,7 @@ if (-not (Test-Path $exePath)) {
     exit 1
 }
 
-# プロセスを起動
+# Start process
 $procArgs = @(
     "--gpu",
     "--prefix", $Prefix,
@@ -78,18 +78,18 @@ $process.StartInfo = $pinfo
 Write-Host "Starting benchmark..." -ForegroundColor Green
 $process.Start() | Out-Null
 
-# 指定秒数待つ
+# Wait for specified seconds
 Start-Sleep -Seconds $Seconds
 
-# プロセスを終了
+# Terminate process
 $process.Kill()
 $process.WaitForExit()
 
-# 出力を取得
+# Get output
 $stdout = $process.StandardOutput.ReadToEnd()
 $stderr = $process.StandardError.ReadToEnd()
 
-# 最後の keys/sec を抽出
+# Extract the last keys/sec value
 $lines = $stdout -split "`n"
 $lastKeysPerSec = $null
 
