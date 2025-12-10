@@ -534,66 +534,6 @@ pub fn generate_pubkeys_with_prefix_match(
     Ok(results)
 }
 
-/// Test mixed point addition on GPU (for unit testing)
-pub fn test_point_add_mixed_gpu(
-    ctx: &Arc<CudaContext>,
-    x1: &[u64; 4],
-    y1: &[u64; 4],
-    z1: &[u64; 4],
-    x2: &[u64; 4],
-    y2: &[u64; 4],
-) -> Result<([u64; 4], [u64; 4]), Box<dyn std::error::Error>> {
-    let stream = ctx.default_stream();
-
-    let ptx_code = include_str!(concat!(env!("OUT_DIR"), "/secp256k1.ptx"));
-    let module = ctx.load_module(Ptx::from_src(ptx_code))?;
-    let kernel = module.load_function("test_point_add_mixed")?;
-
-    // Allocate device memory
-    let mut x1_dev = stream.alloc_zeros::<u64>(4)?;
-    let mut y1_dev = stream.alloc_zeros::<u64>(4)?;
-    let mut z1_dev = stream.alloc_zeros::<u64>(4)?;
-    let mut x2_dev = stream.alloc_zeros::<u64>(4)?;
-    let mut y2_dev = stream.alloc_zeros::<u64>(4)?;
-    let mut output_x_dev = stream.alloc_zeros::<u64>(4)?;
-    let mut output_y_dev = stream.alloc_zeros::<u64>(4)?;
-
-    // Copy inputs to device
-    stream.memcpy_htod(&x1.to_vec(), &mut x1_dev)?;
-    stream.memcpy_htod(&y1.to_vec(), &mut y1_dev)?;
-    stream.memcpy_htod(&z1.to_vec(), &mut z1_dev)?;
-    stream.memcpy_htod(&x2.to_vec(), &mut x2_dev)?;
-    stream.memcpy_htod(&y2.to_vec(), &mut y2_dev)?;
-
-    let config = LaunchConfig {
-        grid_dim: (1, 1, 1),
-        block_dim: (1, 1, 1),
-        shared_mem_bytes: 0,
-    };
-
-    let mut builder = stream.launch_builder(&kernel);
-    builder.arg(&mut x1_dev);
-    builder.arg(&mut y1_dev);
-    builder.arg(&mut z1_dev);
-    builder.arg(&mut x2_dev);
-    builder.arg(&mut y2_dev);
-    builder.arg(&mut output_x_dev);
-    builder.arg(&mut output_y_dev);
-    unsafe {
-        builder.launch(config)?;
-    }
-
-    let result_x_vec = stream.memcpy_dtov(&output_x_dev)?;
-    let result_y_vec = stream.memcpy_dtov(&output_y_dev)?;
-
-    let mut result_x = [0u64; 4];
-    let mut result_y = [0u64; 4];
-    result_x.copy_from_slice(&result_x_vec);
-    result_y.copy_from_slice(&result_y_vec);
-
-    Ok((result_x, result_y))
-}
-
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
