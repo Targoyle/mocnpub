@@ -6,20 +6,20 @@ use hex;
 pub mod gpu;
 
 // =============================================================================
-// バイト列 ↔ [u64; 4] 変換関数（GPU との連携用）
+// Byte array ↔ [u64; 4] conversion functions (for GPU integration)
 // =============================================================================
 
-/// バイト列（32バイト、big-endian）を [u64; 4]（little-endian limbs）に変換
+/// Convert byte array (32 bytes, big-endian) to [u64; 4] (little-endian limbs)
 ///
-/// 秘密鍵を GPU に渡すときに使用
-/// - 入力: big-endian のバイト列（byte[0] が最上位バイト）
-/// - 出力: little-endian limbs（limb[0] が最下位 64 bit）
+/// Used when passing private keys to GPU
+/// - Input: big-endian byte array (byte[0] is the most significant byte)
+/// - Output: little-endian limbs (limb[0] is the least significant 64 bits)
 pub fn bytes_to_u64x4(bytes: &[u8; 32]) -> [u64; 4] {
     let mut result = [0u64; 4];
-    // byte[24..32] → limb[0]（最下位）
+    // byte[24..32] → limb[0] (least significant)
     // byte[16..24] → limb[1]
     // byte[8..16]  → limb[2]
-    // byte[0..8]   → limb[3]（最上位）
+    // byte[0..8]   → limb[3] (most significant)
     for i in 0..4 {
         let offset = (3 - i) * 8; // reverse order
         result[i] = u64::from_be_bytes([
@@ -36,17 +36,17 @@ pub fn bytes_to_u64x4(bytes: &[u8; 32]) -> [u64; 4] {
     result
 }
 
-/// [u64; 4]（little-endian limbs）をバイト列（32バイト、big-endian）に変換
+/// Convert [u64; 4] (little-endian limbs) to byte array (32 bytes, big-endian)
 ///
-/// GPU から返ってきた公開鍵を npub に変換するときに使用
-/// - 入力: little-endian limbs（limb[0] が最下位 64 bit）
-/// - 出力: big-endian のバイト列（byte[0] が最上位バイト）
+/// Used when converting public keys returned from GPU to npub
+/// - Input: little-endian limbs (limb[0] is the least significant 64 bits)
+/// - Output: big-endian byte array (byte[0] is the most significant byte)
 pub fn u64x4_to_bytes(value: &[u64; 4]) -> [u8; 32] {
     let mut result = [0u8; 32];
-    // limb[3]（最上位）→ byte[0..8]
-    // limb[2]          → byte[8..16]
-    // limb[1]          → byte[16..24]
-    // limb[0]（最下位）→ byte[24..32]
+    // limb[3] (most significant) → byte[0..8]
+    // limb[2]                    → byte[8..16]
+    // limb[1]                    → byte[16..24]
+    // limb[0] (least significant) → byte[24..32]
     for i in 0..4 {
         let offset = (3 - i) * 8; // reverse order
         let bytes = value[i].to_be_bytes();
@@ -55,80 +55,80 @@ pub fn u64x4_to_bytes(value: &[u64; 4]) -> [u8; 32] {
     result
 }
 
-/// 公開鍵のバイト列（x座標のみ、32バイト）を npub に変換
+/// Convert public key bytes (x-coordinate only, 32 bytes) to npub
 ///
-/// GPU から返ってきた公開鍵を直接 npub に変換するために使用
-/// 既存の `pubkey_to_npub` は secp256k1::PublicKey を経由するが、
-/// この関数はバイト列から直接変換する
+/// Used to directly convert public keys returned from GPU to npub
+/// The existing `pubkey_to_npub` goes through secp256k1::PublicKey,
+/// but this function converts directly from byte array
 pub fn pubkey_bytes_to_npub(pubkey_bytes: &[u8; 32]) -> String {
     let hrp = Hrp::parse("npub").expect("valid hrp");
     encode::<Bech32>(hrp, pubkey_bytes).expect("failed to encode npub")
 }
 
-/// 公開鍵（x座標のみ32バイト）を npub に変換
+/// Convert public key (x-coordinate only, 32 bytes) to npub
 pub fn pubkey_to_npub(pubkey: &PublicKey) -> String {
-    // 公開鍵の hex 文字列を取得（圧縮形式）
+    // Get hex string of public key (compressed format)
     let pk_hex = pubkey.to_string();
-    // x座標のみを抽出（先頭2文字を除去）
+    // Extract x-coordinate only (remove first 2 characters)
     let pk_x_only = &pk_hex[2..];
 
-    // hex 文字列を 32 バイトのバイト列に変換
+    // Convert hex string to 32-byte array
     let mut bytes = [0u8; 32];
     hex::decode_to_slice(pk_x_only, &mut bytes).expect("Invalid hex string");
 
-    // bech32 エンコード
+    // bech32 encode
     let hrp = Hrp::parse("npub").expect("valid hrp");
     encode::<Bech32>(hrp, &bytes).expect("failed to encode npub")
 }
 
-/// 秘密鍵（32バイト）を nsec に変換
+/// Convert secret key (32 bytes) to nsec
 pub fn seckey_to_nsec(seckey: &SecretKey) -> String {
-    // 秘密鍵のバイト列を取得
+    // Get byte array of secret key
     let bytes = seckey.secret_bytes();
 
-    // bech32 エンコード
+    // bech32 encode
     let hrp = Hrp::parse("nsec").expect("valid hrp");
     encode::<Bech32>(hrp, &bytes).expect("failed to encode nsec")
 }
 
 // =============================================================================
-// Prefix → Bit列変換（GPU での高速マッチング用）
+// Prefix → Bit array conversion (for fast GPU matching)
 // =============================================================================
 
-/// bech32 の文字セット（順番が重要！各文字の位置が 5 bit 値に対応）
+/// bech32 character set (order matters! each character's position corresponds to its 5-bit value)
 const BECH32_CHARSET: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
-/// prefix を bit 列に変換（GPU での高速マッチング用）
+/// Convert prefix to bit array (for fast GPU matching)
 ///
-/// bech32 の各文字を 5 bit 値に変換し、連結して u64 の上位ビットに配置
+/// Convert each bech32 character to 5-bit value and concatenate into upper bits of u64
 ///
 /// # Arguments
-/// * `prefix` - 変換する prefix（最大 12 文字 = 60 bit）
+/// * `prefix` - Prefix to convert (max 12 characters = 60 bits)
 ///
 /// # Returns
-/// * `(pattern, mask, bit_len)` - パターン、マスク、ビット長
-///   - pattern: prefix を 5 bit ずつ連結した値（u64 の上位ビットに配置）
-///   - mask: 有効ビットが 1 のマスク（上位 bit_len ビットが 1）
-///   - bit_len: 有効ビット数（prefix_len * 5）
+/// * `(pattern, mask, bit_len)` - Pattern, mask, and bit length
+///   - pattern: Prefix concatenated as 5 bits each (placed in upper bits of u64)
+///   - mask: Mask with valid bits set to 1 (upper bit_len bits are 1)
+///   - bit_len: Number of valid bits (prefix_len * 5)
 ///
 /// # Example
 /// ```
 /// use mocnpub_main::prefix_to_bits;
 /// let (pattern, mask, bit_len) = prefix_to_bits("m0");
 /// // 'm' = 27 (11011), '0' = 15 (01111)
-/// // pattern = 0b11011_01111_000...0 (上位 10 bit)
-/// // mask    = 0b11111_11111_000...0 (上位 10 bit が 1)
+/// // pattern = 0b11011_01111_000...0 (upper 10 bits)
+/// // mask    = 0b11111_11111_000...0 (upper 10 bits are 1)
 /// // bit_len = 10
 /// ```
 pub fn prefix_to_bits(prefix: &str) -> (u64, u64, u32) {
     let mut pattern: u64 = 0;
-    let mut bit_pos: u32 = 64;  // 上位から配置
+    let mut bit_pos: u32 = 64;  // Place from upper bits
 
     for ch in prefix.chars() {
-        // bech32 文字セットでの位置を取得（0-31）
+        // Get position in bech32 character set (0-31)
         let value = BECH32_CHARSET.find(ch).expect("invalid bech32 char") as u64;
 
-        // 5 bit 分シフトして配置
+        // Shift by 5 bits and place
         bit_pos -= 5;
         pattern |= value << bit_pos;
     }
@@ -137,51 +137,51 @@ pub fn prefix_to_bits(prefix: &str) -> (u64, u64, u32) {
     let mask = if bit_len >= 64 {
         u64::MAX
     } else {
-        !((1u64 << (64 - bit_len)) - 1)  // 上位 bit_len ビットが 1
+        !((1u64 << (64 - bit_len)) - 1)  // Upper bit_len bits are 1
     };
 
     (pattern, mask, bit_len)
 }
 
-/// 複数の prefix を bit 列に変換
+/// Convert multiple prefixes to bit arrays
 ///
 /// # Returns
-/// * `Vec<(pattern, mask, bit_len)>` - 各 prefix のパターン、マスク、ビット長
+/// * `Vec<(pattern, mask, bit_len)>` - Pattern, mask, and bit length for each prefix
 pub fn prefixes_to_bits(prefixes: &[String]) -> Vec<(u64, u64, u32)> {
     prefixes.iter().map(|p| prefix_to_bits(p)).collect()
 }
 
 // =============================================================================
-// 256-bit 演算（連続秘密鍵戦略用）
+// 256-bit arithmetic (for consecutive secret key strategy)
 // =============================================================================
 
-/// 256-bit 値（[u64; 4]）に offset を加算
+/// Add offset to 256-bit value ([u64; 4])
 ///
-/// 連続秘密鍵戦略で、base_key + offset を計算するために使用。
-/// offset は u32 なので、最下位 limb への加算と carry 伝播のみ。
+/// Used in consecutive secret key strategy to compute base_key + offset.
+/// Since offset is u32, only addition to least significant limb and carry propagation needed.
 ///
 /// # Arguments
-/// * `base` - 256-bit 値（little-endian limbs: base[0] が最下位）
-/// * `offset` - 加算する値（最大 u32::MAX）
+/// * `base` - 256-bit value (little-endian limbs: base[0] is least significant)
+/// * `offset` - Value to add (max u32::MAX)
 ///
 /// # Returns
-/// * `[u64; 4]` - base + offset の結果
+/// * `[u64; 4]` - Result of base + offset
 ///
 /// # Example
 /// ```
 /// use mocnpub_main::add_u64x4_scalar;
 /// let base = [0xFFFFFFFF_FFFFFFFFu64, 0, 0, 0];
 /// let result = add_u64x4_scalar(&base, 1);
-/// assert_eq!(result, [0, 1, 0, 0]); // carry が発生
+/// assert_eq!(result, [0, 1, 0, 0]); // carry occurred
 /// ```
 pub fn add_u64x4_scalar(base: &[u64; 4], offset: u32) -> [u64; 4] {
     let mut result = *base;
 
-    // offset を最下位 limb に加算
+    // Add offset to least significant limb
     let (sum, carry) = result[0].overflowing_add(offset as u64);
     result[0] = sum;
 
-    // carry を伝播
+    // Propagate carry
     if carry {
         let (sum, carry) = result[1].overflowing_add(1);
         result[1] = sum;
@@ -405,29 +405,29 @@ fn sub_u64x4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
 }
 
 // =============================================================================
-// Prefix 検証
+// Prefix validation
 // =============================================================================
 
-/// prefix の妥当性を検証（bech32 の有効文字のみを許可）
+/// Validate prefix (only allow valid bech32 characters)
 ///
-/// bech32 で使用可能な文字: 023456789acdefghjklmnpqrstuvwxyz (32文字)
-/// 使用不可な文字: 1, b, i, o（混同を避けるため除外されている）
+/// Valid bech32 characters: 023456789acdefghjklmnpqrstuvwxyz (32 characters)
+/// Invalid characters: 1, b, i, o (excluded to avoid confusion)
 ///
 /// # Returns
-/// - Ok(()) : prefix が有効
-/// - Err(String) : エラーメッセージ
+/// - Ok(()) : prefix is valid
+/// - Err(String) : error message
 pub fn validate_prefix(prefix: &str) -> Result<(), String> {
-    // bech32 の有効な文字セット（32文字）
+    // Valid bech32 character set (32 characters)
     const VALID_CHARS: &str = "023456789acdefghjklmnpqrstuvwxyz";
 
-    // 空文字チェック
+    // Empty string check
     if prefix.is_empty() {
         return Err("Prefix cannot be empty".to_string());
     }
 
-    // 各文字をチェック
+    // Check each character
     for (i, ch) in prefix.chars().enumerate() {
-        // 大文字をチェック
+        // Check for uppercase
         if ch.is_uppercase() {
             return Err(format!(
                 "Invalid prefix '{}': bech32 does not allow uppercase letters (found '{}' at position {})\n\
@@ -436,9 +436,9 @@ pub fn validate_prefix(prefix: &str) -> Result<(), String> {
             ));
         }
 
-        // bech32 で無効な文字をチェック
+        // Check for invalid bech32 characters
         if !VALID_CHARS.contains(ch) {
-            // 特に混同しやすい文字には詳しい説明を追加
+            // Add detailed explanation for commonly confused characters
             let hint = match ch {
                 '1' => "Character '1' is not allowed (reserved as separator in bech32)",
                 'b' | 'i' | 'o' => "Character is excluded to avoid confusion with similar-looking characters",
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_validate_prefix_valid() {
-        // 有効な prefix のテスト
+        // Test valid prefixes
         assert!(validate_prefix("test").is_ok());
         assert!(validate_prefix("0").is_ok());
         assert!(validate_prefix("00").is_ok());
@@ -474,16 +474,16 @@ mod tests {
 
     #[test]
     fn test_validate_prefix_invalid_chars() {
-        // 無効な文字（1, b, i, o）を含む prefix
-        assert!(validate_prefix("abc").is_err()); // 'b' が無効
-        assert!(validate_prefix("test1").is_err()); // '1' が無効
-        assert!(validate_prefix("testi").is_err()); // 'i' が無効
-        assert!(validate_prefix("testo").is_err()); // 'o' が無効
+        // Prefix containing invalid characters (1, b, i, o)
+        assert!(validate_prefix("abc").is_err()); // 'b' is invalid
+        assert!(validate_prefix("test1").is_err()); // '1' is invalid
+        assert!(validate_prefix("testi").is_err()); // 'i' is invalid
+        assert!(validate_prefix("testo").is_err()); // 'o' is invalid
     }
 
     #[test]
     fn test_validate_prefix_uppercase() {
-        // 大文字を含む prefix
+        // Prefix containing uppercase
         assert!(validate_prefix("Test").is_err());
         assert!(validate_prefix("TEST").is_err());
         assert!(validate_prefix("TeSt").is_err());
@@ -491,28 +491,28 @@ mod tests {
 
     #[test]
     fn test_validate_prefix_empty() {
-        // 空文字
+        // Empty string
         assert!(validate_prefix("").is_err());
     }
 
     #[test]
     fn test_seckey_to_nsec() {
-        // テスト用の秘密鍵（hex）
+        // Test secret key (hex)
         let sk_hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
         let sk = SecretKey::from_slice(&hex::decode(sk_hex).unwrap()).unwrap();
         let nsec = seckey_to_nsec(&sk);
 
-        // 正しい nsec（実装から生成された値）
+        // Correct nsec (generated from implementation)
         assert_eq!(nsec, "nsec180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsgyumg0");
 
-        // nsec の形式が正しいことを確認
+        // Verify nsec format is correct
         assert!(nsec.starts_with("nsec1"));
-        assert_eq!(nsec.len(), 63); // nsec1 + 58文字
+        assert_eq!(nsec.len(), 63); // nsec1 + 58 chars
     }
 
     #[test]
     fn test_pubkey_to_npub() {
-        // テスト用の秘密鍵から公開鍵を生成
+        // Generate public key from test secret key
         let sk_hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
         let sk = SecretKey::from_slice(&hex::decode(sk_hex).unwrap()).unwrap();
         let secp = secp256k1::Secp256k1::new();
@@ -520,17 +520,17 @@ mod tests {
 
         let npub = pubkey_to_npub(&pk);
 
-        // 正しい npub（実装から生成された値）
+        // Correct npub (generated from implementation)
         assert_eq!(npub, "npub1wxxh2mmqeaghnme4kwwudkel7k8sfsrnf7qld4zppu9sglwljq5shd0y24");
 
-        // npub の形式が正しいことを確認
+        // Verify npub format is correct
         assert!(npub.starts_with("npub1"));
-        assert_eq!(npub.len(), 63); // npub1 + 58文字
+        assert_eq!(npub.len(), 63); // npub1 + 58 chars
     }
 
     #[test]
     fn test_validate_prefix_error_messages() {
-        // エラーメッセージの内容を確認
+        // Verify error message content
         let err = validate_prefix("abc").unwrap_err();
         assert!(err.contains("bech32 does not allow 'b'"));
         assert!(err.contains("excluded to avoid confusion"));
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_bytes_u64x4_roundtrip() {
-        // ラウンドトリップテスト：bytes → u64x4 → bytes
+        // Roundtrip test: bytes → u64x4 → bytes
         let original_bytes: [u8; 32] = [
             0xC6, 0x04, 0x7F, 0x94, 0x41, 0xED, 0x7D, 0x6D,  // byte[0..8]
             0x30, 0x45, 0x40, 0x6E, 0x95, 0xC0, 0x7C, 0xD8,  // byte[8..16]
@@ -565,9 +565,9 @@ mod tests {
 
     #[test]
     fn test_u64x4_to_bytes_2g() {
-        // 2G の x 座標を使ったテスト
-        // GPU の結果: [0xABAC09B95C709EE5, 0x5C778E4B8CEF3CA7, 0x3045406E95C07CD8, 0xC6047F9441ED7D6D]
-        // 期待値 (big-endian bytes): C6047F9441ED7D6D3045406E95C07CD85C778E4B8CEF3CA7ABAC09B95C709EE5
+        // Test using 2G x-coordinate
+        // GPU result: [0xABAC09B95C709EE5, 0x5C778E4B8CEF3CA7, 0x3045406E95C07CD8, 0xC6047F9441ED7D6D]
+        // Expected (big-endian bytes): C6047F9441ED7D6D3045406E95C07CD85C778E4B8CEF3CA7ABAC09B95C709EE5
         let gpu_result: [u64; 4] = [
             0xABAC09B95C709EE5u64,
             0x5C778E4B8CEF3CA7u64,
@@ -587,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_pubkey_bytes_to_npub_2g() {
-        // 2G の x 座標を npub に変換
+        // Convert 2G x-coordinate to npub
         let pubkey_bytes: [u8; 32] = [
             0xC6, 0x04, 0x7F, 0x94, 0x41, 0xED, 0x7D, 0x6D,
             0x30, 0x45, 0x40, 0x6E, 0x95, 0xC0, 0x7C, 0xD8,
@@ -597,7 +597,7 @@ mod tests {
 
         let npub = pubkey_bytes_to_npub(&pubkey_bytes);
 
-        // npub の形式が正しいことを確認
+        // Verify npub format is correct
         assert!(npub.starts_with("npub1"), "npub should start with 'npub1'");
         assert_eq!(npub.len(), 63, "npub should be 63 characters");
 
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_prefix_to_bits_single_char() {
-        // 1文字のテスト: 'q' = 0, 'm' = 27, 'l' = 31
+        // Single character test: 'q' = 0, 'm' = 27, 'l' = 31
         let (pattern, mask, bit_len) = prefix_to_bits("q");
         assert_eq!(bit_len, 5);
         assert_eq!(pattern, 0b00000_u64 << 59);  // 'q' = 0
@@ -626,23 +626,23 @@ mod tests {
         assert_eq!(bit_len, 10);
 
         // 'm' = 27 (11011), '0' = 15 (01111)
-        // 上位 10 bit に配置: 11011_01111_00...0
+        // Placed in upper 10 bits: 11011_01111_00...0
         let expected_pattern = (0b11011_01111_u64) << 54;
         assert_eq!(pattern, expected_pattern);
 
-        // マスク: 上位 10 bit が 1
+        // Mask: upper 10 bits are 1
         let expected_mask = 0b11111_11111_u64 << 54;
         assert_eq!(mask, expected_mask);
     }
 
     #[test]
     fn test_prefix_to_bits_m0ctane() {
-        // 'm0ctane' (7文字 = 35 bit)
+        // 'm0ctane' (7 characters = 35 bits)
         // 'm'=27, '0'=15, 'c'=24, 't'=11, 'a'=29, 'n'=19, 'e'=25
         let (pattern, mask, bit_len) = prefix_to_bits("m0ctane");
         assert_eq!(bit_len, 35);
 
-        // 各文字の 5 bit 値を連結
+        // Concatenate 5-bit value of each character
         let m = 27u64;  // 11011
         let zero = 15u64;  // 01111
         let c = 24u64;  // 11000
@@ -654,15 +654,15 @@ mod tests {
         let expected_pattern = (m << 30 | zero << 25 | c << 20 | t << 15 | a << 10 | n << 5 | e) << (64 - 35);
         assert_eq!(pattern, expected_pattern);
 
-        // マスク: 上位 35 bit が 1
+        // Mask: upper 35 bits are 1
         let expected_mask = !((1u64 << (64 - 35)) - 1);
         assert_eq!(mask, expected_mask);
     }
 
     #[test]
     fn test_prefix_to_bits_matches_npub() {
-        // 実際の npub との整合性テスト
-        // 2G の npub を生成して、prefix がマッチすることを確認
+        // Consistency test with actual npub
+        // Generate 2G npub and verify prefix matches
         let pubkey_bytes: [u8; 32] = [
             0xC6, 0x04, 0x7F, 0x94, 0x41, 0xED, 0x7D, 0x6D,
             0x30, 0x45, 0x40, 0x6E, 0x95, 0xC0, 0x7C, 0xD8,
@@ -671,11 +671,11 @@ mod tests {
         ];
 
         let npub = pubkey_bytes_to_npub(&pubkey_bytes);
-        let npub_body = &npub[5..];  // "npub1" を除去
+        let npub_body = &npub[5..];  // Remove "npub1"
         println!("2G npub body: {}", npub_body);
 
-        // npub body の最初の数文字で prefix を作って、ビットマッチングをテスト
-        let prefix = &npub_body[..4];  // 最初の 4 文字
+        // Create prefix from first few characters of npub body and test bit matching
+        let prefix = &npub_body[..4];  // First 4 characters
         println!("Testing prefix: {}", prefix);
 
         let (pattern, mask, bit_len) = prefix_to_bits(prefix);
@@ -683,14 +683,14 @@ mod tests {
         println!("mask:    {:064b}", mask);
         println!("bit_len: {}", bit_len);
 
-        // pubkey_bytes の上位 64 bit を取得
+        // Get upper 64 bits of pubkey_bytes
         let pubkey_upper = u64::from_be_bytes([
             pubkey_bytes[0], pubkey_bytes[1], pubkey_bytes[2], pubkey_bytes[3],
             pubkey_bytes[4], pubkey_bytes[5], pubkey_bytes[6], pubkey_bytes[7],
         ]);
         println!("pubkey upper: {:064b}", pubkey_upper);
 
-        // マッチするはず！
+        // Should match!
         assert_eq!(pubkey_upper & mask, pattern & mask, "prefix should match");
     }
 }
@@ -701,7 +701,7 @@ mod endomorphism_tests {
 
     #[test]
     fn test_mod_n_mult_lambda_sq() {
-        // Python で計算した正しい値
+        // Correct value calculated with Python
         // k = 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
         let k: [u64; 4] = [
             0x1234567890abcdef,
@@ -709,8 +709,8 @@ mod endomorphism_tests {
             0x1234567890abcdef,
             0x1234567890abcdef,
         ];
-        
-        // 正しい λ²*k mod n = 0x30f00e02e8cdf3ecd8166c5214a47c18e7402da72d337fed8281d3ae181c72ae
+
+        // Correct λ²*k mod n = 0x30f00e02e8cdf3ecd8166c5214a47c18e7402da72d337fed8281d3ae181c72ae
         let expected: [u64; 4] = [
             0x8281d3ae181c72ae,
             0xe7402da72d337fed,

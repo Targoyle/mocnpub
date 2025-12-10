@@ -7,55 +7,54 @@ use std::time::Instant;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 
-// lib.rs から共通関数を import
+// Import common functions from lib.rs
 use mocnpub_main::{pubkey_to_npub, seckey_to_nsec, validate_prefix};
 use mocnpub_main::{bytes_to_u64x4, u64x4_to_bytes, pubkey_bytes_to_npub};
 use mocnpub_main::{prefixes_to_bits, add_u64x4_scalar, adjust_privkey_for_endomorphism};
 use mocnpub_main::gpu::{init_gpu, generate_pubkeys_with_prefix_match, get_sm_count, calculate_optimal_batch_size};
 
-/// Nostr npub マイニングツール 🔑
+/// Nostr npub mining tool 🔑
 ///
-/// 指定した prefix を持つ npub（Nostr 公開鍵）を見つけるマイニングツール。
-/// CPU 版の実装で、GPU 版は Step 3 で実装予定。
+/// Mining tool to find npub (Nostr public key) with specified prefix.
 #[derive(Parser, Debug)]
 #[command(name = "mocnpub")]
-#[command(about = "Nostr npub マイニングツール 🔑", long_about = None)]
+#[command(about = "Nostr npub mining tool 🔑", long_about = None)]
 struct Args {
-    /// マイニングする prefix（npub1 に続く bech32 文字列）
+    /// Prefix to mine (bech32 string following npub1)
     ///
-    /// 単一 prefix: "abc", "test", "satoshi"
-    /// 複数 prefix（OR 指定）: "m0ctane0,m0ctane2,m0ctane3"（カンマ区切り）
-    /// 完全な npub 例: npub1abc... の "abc" 部分を指定
+    /// Single prefix: "abc", "test", "satoshi"
+    /// Multiple prefixes (OR): "m0ctane0,m0ctane2,m0ctane3" (comma-separated)
+    /// Full npub example: specify "abc" part of npub1abc...
     #[arg(short, long)]
     prefix: String,
 
-    /// 結果を出力するファイル（オプション、デフォルトは stdout）
+    /// Output file (optional, defaults to stdout)
     #[arg(short, long)]
     output: Option<String>,
 
-    /// スレッド数（デフォルト: CPU コア数を自動検出）
+    /// Number of threads (default: auto-detect CPU cores)
     #[arg(short, long)]
     threads: Option<usize>,
 
-    /// 見つける鍵の個数（0 = 無限、デフォルト: 1）
+    /// Number of keys to find (0 = unlimited, default: 1)
     #[arg(short, long, default_value = "1")]
     limit: usize,
 
-    /// GPU モードを有効化（CUDA を使用して高速マイニング）
+    /// Enable GPU mode (use CUDA for fast mining)
     #[arg(long)]
     gpu: bool,
 
-    /// GPU バッチサイズ（デフォルト: 3584000、400 waves）
+    /// GPU batch size (default: 3584000, 400 waves)
     #[arg(long, default_value = "3584000")]
     batch_size: usize,
 
-    /// GPU スレッド数/ブロック（デフォルト: 128、RTX 5070 Ti 向け最適値）
+    /// GPU threads per block (default: 128, optimal for RTX 5070 Ti)
     #[arg(long, default_value = "128")]
     threads_per_block: u32,
 }
 
-/// ビルド時に決定される keys_per_thread の値を取得
-/// 環境変数 MAX_KEYS_PER_THREAD で指定可能（デフォルト: 1408）
+/// Get keys_per_thread value determined at build time
+/// Can be specified via MAX_KEYS_PER_THREAD env var (default: 1408)
 fn get_max_keys_per_thread() -> u32 {
     env!("MAX_KEYS_PER_THREAD").parse().expect("MAX_KEYS_PER_THREAD must be a valid u32")
 }
