@@ -230,6 +230,33 @@ const LAMBDA_SQ: [u64; 4] = [
     0xac9c52b33fa3cf1f,
 ];
 
+/// β = cube root of unity mod p (for endomorphism on public key X-coordinate)
+/// β = 0x7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee
+pub const BETA: [u64; 4] = [
+    0xc1396c28719501ee,
+    0x9cf0497512f58995,
+    0x6e64479eac3434e9,
+    0x7ae96a2b657c0710,
+];
+
+/// β² = β * β mod p
+/// β² = 0x851695d49a83f8ef919bb86153cbcb16630fb68aed0a766a3ec693d68e6afa40
+pub const BETA_SQ: [u64; 4] = [
+    0x3ec693d68e6afa40,
+    0x630fb68aed0a766a,
+    0x919bb86153cbcb16,
+    0x851695d49a83f8ef,
+];
+
+/// p = secp256k1 prime field modulus
+/// p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+const P: [u64; 4] = [
+    0xFFFFFFFEFFFFFC2F,
+    0xFFFFFFFFFFFFFFFF,
+    0xFFFFFFFFFFFFFFFF,
+    0xFFFFFFFFFFFFFFFF,
+];
+
 /// Adjust private key for endomorphism
 ///
 /// When using endomorphism, we check 3 public keys: P, β*P, β²*P
@@ -274,6 +301,95 @@ fn mod_n_mult(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
 
     // Step 2: Reduce mod n
     reduce_mod_n(&product)
+}
+
+/// 256-bit multiplication modulo p (secp256k1 prime field)
+///
+/// Computes (a * b) mod p using schoolbook multiplication followed by reduction
+pub fn mod_p_mult(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+    // Step 1: 256x256 -> 512-bit multiplication
+    let mut product = [0u64; 8];
+
+    for i in 0..4 {
+        let mut carry = 0u64;
+        for j in 0..4 {
+            let pos = i + j;
+            let (lo, hi) = mul_u64(a[i], b[j]);
+
+            // Add low part
+            let (sum, c1) = product[pos].overflowing_add(lo);
+            let (sum, c2) = sum.overflowing_add(carry);
+            product[pos] = sum;
+            carry = hi + (c1 as u64) + (c2 as u64);
+        }
+        product[i + 4] = product[i + 4].wrapping_add(carry);
+    }
+
+    // Step 2: Reduce mod p
+    reduce_mod_p(&product)
+}
+
+/// Reduce a 512-bit number modulo p
+fn reduce_mod_p(val: &[u64; 8]) -> [u64; 4] {
+    let high = [val[4], val[5], val[6], val[7]];
+
+    // If high part is non-zero, we need to reduce
+    if high != [0, 0, 0, 0] {
+        return reduce_512_mod_p_simple(val);
+    }
+
+    // High part is zero, just check if low >= p
+    let mut result = [val[0], val[1], val[2], val[3]];
+
+    // If result >= p, subtract p
+    while cmp_u64x4(&result, &P) >= 0 {
+        result = sub_u64x4(&result, &P);
+    }
+
+    result
+}
+
+/// Simple 512-bit to 256-bit reduction modulo p
+fn reduce_512_mod_p_simple(val: &[u64; 8]) -> [u64; 4] {
+    // Convert to big integers for simplicity
+    // This is not the fastest, but correct
+    let mut result = [0u64; 8];
+    result.copy_from_slice(val);
+
+    // While result >= 2^256, reduce by subtracting multiples of p
+    // Since p ≈ 2^256, we can use: result = result_low + result_high * (2^256 mod p)
+    // 2^256 mod p = 0x1000003d1 (a small constant)
+    const TWO_256_MOD_P: u64 = 0x1000003d1;
+
+    loop {
+        let high = [result[4], result[5], result[6], result[7]];
+        if high == [0, 0, 0, 0] {
+            break;
+        }
+
+        // Multiply high part by 2^256 mod p and add to low part
+        let mut carry = 0u128;
+        for i in 0..4 {
+            carry += result[i] as u128 + (high[i] as u128) * (TWO_256_MOD_P as u128);
+            result[i] = carry as u64;
+            carry >>= 64;
+        }
+
+        // Clear high part and handle remaining carry
+        result[4] = carry as u64;
+        result[5] = 0;
+        result[6] = 0;
+        result[7] = 0;
+    }
+
+    let mut out = [result[0], result[1], result[2], result[3]];
+
+    // Final reduction if still >= p
+    while cmp_u64x4(&out, &P) >= 0 {
+        out = sub_u64x4(&out, &P);
+    }
+
+    out
 }
 
 /// Multiply two u64 values, returning (low, high) parts of the 128-bit result

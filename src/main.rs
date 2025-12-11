@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use secp256k1::rand::{self, RngCore};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use std::fs::OpenOptions;
@@ -10,49 +10,64 @@ use std::time::Instant;
 // Import common functions from lib.rs
 use mocnpub_main::gpu::{
     calculate_optimal_batch_size, generate_pubkeys_with_prefix_match, get_sm_count, init_gpu,
+    test_point_mult_gpu,
 };
+use mocnpub_main::{BETA, BETA_SQ, mod_p_mult, pubkey_to_npub, seckey_to_nsec, validate_prefix};
 use mocnpub_main::{add_u64x4_scalar, adjust_privkey_for_endomorphism, prefixes_to_bits};
 use mocnpub_main::{bytes_to_u64x4, pubkey_bytes_to_npub, u64x4_to_bytes};
-use mocnpub_main::{pubkey_to_npub, seckey_to_nsec, validate_prefix};
 
 /// Nostr npub mining tool 🔑
-///
-/// Mining tool to find npub (Nostr public key) with specified prefix.
 #[derive(Parser, Debug)]
 #[command(name = "mocnpub")]
 #[command(about = "Nostr npub mining tool 🔑", long_about = None)]
-struct Args {
-    /// Prefix to mine (bech32 string following npub1)
-    ///
-    /// Single prefix: "abc", "test", "satoshi"
-    /// Multiple prefixes (OR): "m0ctane0,m0ctane2,m0ctane3" (comma-separated)
-    /// Full npub example: specify "abc" part of npub1abc...
-    #[arg(short, long)]
-    prefix: String,
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Output file (optional, defaults to stdout)
-    #[arg(short, long)]
-    output: Option<String>,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Mine npub with specified prefix
+    Mine {
+        /// Prefix to mine (bech32 string following npub1)
+        ///
+        /// Single prefix: "abc", "test", "satoshi"
+        /// Multiple prefixes (OR): "m0ctane0,m0ctane2,m0ctane3" (comma-separated)
+        /// Full npub example: specify "abc" part of npub1abc...
+        #[arg(short, long)]
+        prefix: String,
 
-    /// Number of threads (default: auto-detect CPU cores)
-    #[arg(short, long)]
-    threads: Option<usize>,
+        /// Output file (optional, defaults to stdout)
+        #[arg(short, long)]
+        output: Option<String>,
 
-    /// Number of keys to find (0 = unlimited, default: 1)
-    #[arg(short, long, default_value = "1")]
-    limit: usize,
+        /// Number of threads (default: auto-detect CPU cores)
+        #[arg(short, long)]
+        threads: Option<usize>,
 
-    /// Enable GPU mode (use CUDA for fast mining)
-    #[arg(long)]
-    gpu: bool,
+        /// Number of keys to find (0 = unlimited, default: 1)
+        #[arg(short, long, default_value = "1")]
+        limit: usize,
 
-    /// GPU batch size (default: 3584000, 400 waves)
-    #[arg(long, default_value = "3584000")]
-    batch_size: usize,
+        /// Enable GPU mode (use CUDA for fast mining)
+        #[arg(long)]
+        gpu: bool,
 
-    /// GPU threads per block (default: 128, optimal for RTX 5070 Ti)
-    #[arg(long, default_value = "128")]
-    threads_per_block: u32,
+        /// GPU batch size (default: 3584000, 400 waves)
+        #[arg(long, default_value = "3584000")]
+        batch_size: usize,
+
+        /// GPU threads per block (default: 128, optimal for RTX 5070 Ti)
+        #[arg(long, default_value = "128")]
+        threads_per_block: u32,
+    },
+
+    /// Verify GPU calculations against CPU (fuzzing-like testing)
+    Verify {
+        /// Number of iterations (0 = unlimited, run until Ctrl+C)
+        #[arg(short, long, default_value = "0")]
+        iterations: u64,
+    },
 }
 
 /// Get keys_per_thread value determined at build time
@@ -64,25 +79,53 @@ fn get_max_keys_per_thread() -> u32 {
 }
 
 fn main() -> io::Result<()> {
-    let args = Args::parse();
+    let cli = Cli::parse();
 
+    match cli.command {
+        Commands::Mine {
+            prefix,
+            output,
+            threads,
+            limit,
+            gpu,
+            batch_size,
+            threads_per_block,
+        } => run_mine(
+            prefix,
+            output,
+            threads,
+            limit,
+            gpu,
+            batch_size,
+            threads_per_block,
+        ),
+        Commands::Verify { iterations } => run_verify(iterations),
+    }
+}
+
+/// Run the mine subcommand
+fn run_mine(
+    prefix: String,
+    output: Option<String>,
+    threads: Option<usize>,
+    limit: usize,
+    gpu: bool,
+    batch_size: usize,
+    threads_per_block: u32,
+) -> io::Result<()> {
     // Split prefix by comma and convert to Vec
-    let prefixes: Vec<String> = args
-        .prefix
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
+    let prefixes: Vec<String> = prefix.split(',').map(|s| s.trim().to_string()).collect();
 
     // Validate each prefix
-    for prefix in &prefixes {
-        if let Err(err_msg) = validate_prefix(prefix) {
+    for p in &prefixes {
+        if let Err(err_msg) = validate_prefix(p) {
             eprintln!("❌ Error: {}", err_msg);
             std::process::exit(1);
         }
     }
 
     // Determine thread count (from args or auto-detect CPU cores)
-    let num_threads = args.threads.unwrap_or_else(num_cpus::get);
+    let num_threads = threads.unwrap_or_else(num_cpus::get);
 
     println!("🔥 mocnpub - Nostr npub mining 🔥");
     if prefixes.len() == 1 {
@@ -92,29 +135,29 @@ fn main() -> io::Result<()> {
     }
 
     // Branch based on GPU or CPU mode
-    if args.gpu {
+    if gpu {
         let keys_per_thread = get_max_keys_per_thread();
         println!("Mode: GPU (CUDA) 🚀");
-        println!("Batch size: {}", args.batch_size);
+        println!("Batch size: {}", batch_size);
         println!(
             "Threads/block: {}, Keys/thread: {} (build-time)",
-            args.threads_per_block, keys_per_thread
+            threads_per_block, keys_per_thread
         );
         println!(
             "Limit: {}\n",
-            if args.limit == 0 {
+            if limit == 0 {
                 "unlimited".to_string()
             } else {
-                args.limit.to_string()
+                limit.to_string()
             }
         );
         return run_gpu_mining(
             &prefixes,
-            args.limit,
-            args.batch_size,
-            args.threads_per_block,
+            limit,
+            batch_size,
+            threads_per_block,
             keys_per_thread,
-            args.output.as_deref(),
+            output.as_deref(),
         );
     }
 
@@ -122,10 +165,10 @@ fn main() -> io::Result<()> {
     println!("Threads: {}", num_threads);
     println!(
         "Limit: {}\n",
-        if args.limit == 0 {
+        if limit == 0 {
             "unlimited".to_string()
         } else {
-            args.limit.to_string()
+            limit.to_string()
         }
     );
 
@@ -148,7 +191,7 @@ fn main() -> io::Result<()> {
             let total_count = Arc::clone(&total_count);
             let found_count = Arc::clone(&found_count);
             let sender = sender.clone();
-            let limit = args.limit;
+            let limit = limit;
 
             std::thread::spawn(move || {
                 let secp = Secp256k1::new();
@@ -214,7 +257,7 @@ fn main() -> io::Result<()> {
     // Progress display thread
     let total_count_progress = Arc::clone(&total_count);
     let found_count_progress = Arc::clone(&found_count);
-    let limit_progress = args.limit;
+    let limit_progress = limit;
     let progress_handle = std::thread::spawn(move || {
         loop {
             // Exit if limit reached (0 = unlimited, never exit)
@@ -232,7 +275,7 @@ fn main() -> io::Result<()> {
     });
 
     // Prepare file output (append mode)
-    let mut output_file = if let Some(ref output_path) = args.output {
+    let mut output_file = if let Some(ref output_path) = output {
         Some(
             OpenOptions::new()
                 .create(true)
@@ -306,7 +349,7 @@ fn main() -> io::Result<()> {
     println!("Keys found: {}", result_count);
     println!("Total attempts: {}", final_count);
     println!("Elapsed: {:.2} sec", elapsed_secs);
-    if let Some(ref output_path) = args.output {
+    if let Some(ref output_path) = output {
         println!("Results saved to: {}", output_path);
     }
 
@@ -528,4 +571,216 @@ fn run_gpu_mining(
             );
         }
     }
+}
+
+/// Run the verify subcommand (GPU vs CPU verification)
+fn run_verify(iterations: u64) -> io::Result<()> {
+    println!("🔬 mocnpub - GPU Verification Mode 🔬");
+    println!(
+        "Iterations: {}\n",
+        if iterations == 0 {
+            "unlimited (Ctrl+C to stop)".to_string()
+        } else {
+            iterations.to_string()
+        }
+    );
+
+    // Initialize GPU
+    let ctx = match init_gpu() {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("❌ GPU initialization failed: {}", e);
+            std::process::exit(1);
+        }
+    };
+    println!("✅ GPU initialized successfully!\n");
+
+    // secp256k1 generator point G
+    let g_x: [u64; 4] = [
+        0x59F2815B16F81798,
+        0x029BFCDB2DCE28D9,
+        0x55A06295CE870B07,
+        0x79BE667EF9DCBBAC,
+    ];
+    let g_y: [u64; 4] = [
+        0x9C47D08FFB10D4B8,
+        0xFD17B448A6855419,
+        0x5DA4FBFC0E1108A8,
+        0x483ADA7726A3C465,
+    ];
+
+    let secp = Secp256k1::new();
+    let mut rng = rand::thread_rng();
+    let start = Instant::now();
+    let mut count: u64 = 0;
+    let mut errors: u64 = 0;
+
+    println!("Starting verification...\n");
+
+    loop {
+        // Check iteration limit
+        if iterations > 0 && count >= iterations {
+            break;
+        }
+
+        // Generate random secret key
+        let mut sk_bytes = [0u8; 32];
+        rng.fill_bytes(&mut sk_bytes);
+
+        // Ensure it's a valid secret key (non-zero, less than n)
+        let sk = match SecretKey::from_slice(&sk_bytes) {
+            Ok(sk) => sk,
+            Err(_) => continue, // Skip invalid keys
+        };
+
+        let sk_u64 = bytes_to_u64x4(&sk_bytes);
+
+        // === Test 1: GPU vs CPU public key computation ===
+        let gpu_result = match test_point_mult_gpu(&ctx, &sk_u64, &g_x, &g_y) {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("❌ GPU kernel error: {}", e);
+                errors += 1;
+                continue;
+            }
+        };
+        let (gpu_px, gpu_py) = gpu_result;
+
+        // CPU computation
+        let cpu_pk = sk.public_key(&secp);
+        let cpu_pk_bytes = cpu_pk.serialize_uncompressed();
+        // Uncompressed format: 0x04 || x (32 bytes) || y (32 bytes)
+        let cpu_px_bytes: [u8; 32] = cpu_pk_bytes[1..33].try_into().unwrap();
+        let cpu_py_bytes: [u8; 32] = cpu_pk_bytes[33..65].try_into().unwrap();
+        let cpu_px = bytes_to_u64x4(&cpu_px_bytes);
+        let cpu_py = bytes_to_u64x4(&cpu_py_bytes);
+
+        // Compare
+        if gpu_px != cpu_px || gpu_py != cpu_py {
+            eprintln!("❌ MISMATCH at iteration {}!", count);
+            eprintln!(
+                "  Secret key: {:016x}{:016x}{:016x}{:016x}",
+                sk_u64[3], sk_u64[2], sk_u64[1], sk_u64[0]
+            );
+            eprintln!(
+                "  GPU Px: {:016x}{:016x}{:016x}{:016x}",
+                gpu_px[3], gpu_px[2], gpu_px[1], gpu_px[0]
+            );
+            eprintln!(
+                "  CPU Px: {:016x}{:016x}{:016x}{:016x}",
+                cpu_px[3], cpu_px[2], cpu_px[1], cpu_px[0]
+            );
+            eprintln!(
+                "  GPU Py: {:016x}{:016x}{:016x}{:016x}",
+                gpu_py[3], gpu_py[2], gpu_py[1], gpu_py[0]
+            );
+            eprintln!(
+                "  CPU Py: {:016x}{:016x}{:016x}{:016x}",
+                cpu_py[3], cpu_py[2], cpu_py[1], cpu_py[0]
+            );
+            errors += 1;
+            continue;
+        }
+
+        // === Test 2: Endomorphism verification ===
+        // β * Px (mod p) should equal the X-coordinate of (λ * k) * G
+        let beta_px = mod_p_mult(&cpu_px, &BETA);
+
+        // Compute λ*k mod n and get its public key
+        let lambda_k = adjust_privkey_for_endomorphism(&sk_u64, 1);
+        let lambda_k_bytes = u64x4_to_bytes(&lambda_k);
+        let lambda_sk = match SecretKey::from_slice(&lambda_k_bytes) {
+            Ok(sk) => sk,
+            Err(_) => {
+                // λ*k might be >= n, which is invalid. Skip this case.
+                count += 1;
+                continue;
+            }
+        };
+        let lambda_pk = lambda_sk.public_key(&secp);
+        let lambda_pk_bytes = lambda_pk.serialize_uncompressed();
+        let lambda_px_bytes: [u8; 32] = lambda_pk_bytes[1..33].try_into().unwrap();
+        let lambda_px = bytes_to_u64x4(&lambda_px_bytes);
+
+        if beta_px != lambda_px {
+            eprintln!("❌ ENDOMORPHISM MISMATCH (β) at iteration {}!", count);
+            eprintln!(
+                "  Secret key: {:016x}{:016x}{:016x}{:016x}",
+                sk_u64[3], sk_u64[2], sk_u64[1], sk_u64[0]
+            );
+            eprintln!(
+                "  β*Px:      {:016x}{:016x}{:016x}{:016x}",
+                beta_px[3], beta_px[2], beta_px[1], beta_px[0]
+            );
+            eprintln!(
+                "  (λ*k)*G x: {:016x}{:016x}{:016x}{:016x}",
+                lambda_px[3], lambda_px[2], lambda_px[1], lambda_px[0]
+            );
+            errors += 1;
+            continue;
+        }
+
+        // === Test 3: β² endomorphism verification ===
+        let beta2_px = mod_p_mult(&cpu_px, &BETA_SQ);
+
+        let lambda2_k = adjust_privkey_for_endomorphism(&sk_u64, 2);
+        let lambda2_k_bytes = u64x4_to_bytes(&lambda2_k);
+        let lambda2_sk = match SecretKey::from_slice(&lambda2_k_bytes) {
+            Ok(sk) => sk,
+            Err(_) => {
+                count += 1;
+                continue;
+            }
+        };
+        let lambda2_pk = lambda2_sk.public_key(&secp);
+        let lambda2_pk_bytes = lambda2_pk.serialize_uncompressed();
+        let lambda2_px_bytes: [u8; 32] = lambda2_pk_bytes[1..33].try_into().unwrap();
+        let lambda2_px = bytes_to_u64x4(&lambda2_px_bytes);
+
+        if beta2_px != lambda2_px {
+            eprintln!("❌ ENDOMORPHISM MISMATCH (β²) at iteration {}!", count);
+            eprintln!(
+                "  Secret key:  {:016x}{:016x}{:016x}{:016x}",
+                sk_u64[3], sk_u64[2], sk_u64[1], sk_u64[0]
+            );
+            eprintln!(
+                "  β²*Px:       {:016x}{:016x}{:016x}{:016x}",
+                beta2_px[3], beta2_px[2], beta2_px[1], beta2_px[0]
+            );
+            eprintln!(
+                "  (λ²*k)*G x:  {:016x}{:016x}{:016x}{:016x}",
+                lambda2_px[3], lambda2_px[2], lambda2_px[1], lambda2_px[0]
+            );
+            errors += 1;
+            continue;
+        }
+
+        count += 1;
+
+        // Progress display (every 1000 iterations)
+        if count % 1000 == 0 {
+            let elapsed_secs = start.elapsed().as_secs_f64();
+            let rate = count as f64 / elapsed_secs;
+            println!(
+                "✅ {} iterations OK ({:.1} iter/sec, {} errors)",
+                count, rate, errors
+            );
+        }
+    }
+
+    // Final summary
+    let elapsed = start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+    println!("\n🎉 Verification complete!");
+    println!("Total iterations: {}", count);
+    println!("Errors: {}", errors);
+    println!("Elapsed: {:.2} sec", elapsed_secs);
+    println!("Rate: {:.1} iterations/sec", count as f64 / elapsed_secs);
+
+    if errors > 0 {
+        eprintln!("\n⚠️  {} errors detected!", errors);
+        std::process::exit(1);
+    }
+
+    Ok(())
 }
