@@ -190,7 +190,6 @@ fn run_mine(
             let total_count = Arc::clone(&total_count);
             let found_count = Arc::clone(&found_count);
             let sender = sender.clone();
-            let limit = limit;
 
             std::thread::spawn(move || {
                 let secp = Secp256k1::new();
@@ -747,7 +746,7 @@ fn run_verify(iterations: u64) -> io::Result<()> {
         total_keys_checked += batch_size as u64 * keys_per_thread as u64 * 3;
 
         // Progress display (every 100 batches)
-        if batch_count % 100 == 0 {
+        if batch_count.is_multiple_of(100) {
             let elapsed_secs = start.elapsed().as_secs_f64();
             let keys_per_sec = total_keys_checked as f64 / elapsed_secs;
             println!(
