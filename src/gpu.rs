@@ -59,6 +59,7 @@ pub fn calculate_optimal_batch_size(
 /// Test modular addition on GPU
 ///
 /// This function tests the _ModAdd function by adding two 256-bit numbers modulo p
+#[cfg(test)]
 pub fn test_mod_add_gpu(
     ctx: &Arc<CudaContext>,
     a: &[u64; 4],
@@ -114,6 +115,7 @@ pub fn test_mod_add_gpu(
 /// Test modular multiplication on GPU
 ///
 /// This function tests the _ModMult function by multiplying two 256-bit numbers modulo p
+#[cfg(test)]
 pub fn test_mod_mult_gpu(
     ctx: &Arc<CudaContext>,
     a: &[u64; 4],
@@ -169,6 +171,7 @@ pub fn test_mod_mult_gpu(
 /// Test modular inverse on GPU
 ///
 /// This function tests the _ModInv function by computing a^(-1) mod p
+#[cfg(test)]
 pub fn test_mod_inv_gpu(
     ctx: &Arc<CudaContext>,
     a: &[u64; 4],
@@ -219,6 +222,7 @@ pub fn test_mod_inv_gpu(
 /// Test modular squaring on GPU
 ///
 /// This function tests the _ModSquare function by computing a^2 mod p
+#[cfg(test)]
 pub fn test_mod_square_gpu(
     ctx: &Arc<CudaContext>,
     a: &[u64; 4],
@@ -271,6 +275,7 @@ pub fn test_mod_square_gpu(
 /// This function tests the _PointDouble function by doubling a point on the secp256k1 curve
 /// Input: Point in Affine coordinates (x, y)
 /// Output: 2*Point in Affine coordinates (x, y)
+#[cfg(test)]
 #[allow(non_snake_case)]
 pub fn test_point_double_gpu(
     ctx: &Arc<CudaContext>,
@@ -338,6 +343,7 @@ pub fn test_point_double_gpu(
 /// This function tests the _PointMult function by computing k * P
 /// Input: scalar k (256-bit), point P in Affine coordinates (x, y)
 /// Output: k*P in Affine coordinates (x, y)
+#[cfg(test)]
 pub fn test_point_mult_gpu(
     ctx: &Arc<CudaContext>,
     k: &[u64; 4],
