@@ -491,7 +491,6 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
     // Process from MSB to LSB
     uint64_t res[4] = {1, 0, 0, 0};  // Start with 1
     bool started = false;  // Track if we've seen the first 1 bit
-    int step = 0;
 
     // Iterate through all bits of exp (from MSB to LSB)
     for (int i = 3; i >= 0; i--) {
@@ -507,12 +506,11 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
                     for (int k = 0; k < 4; k++) {
                         res[k] = a[k];
                     }
-                    step++;
                 }
             } else {
                 // Square res
                 uint64_t temp[4];
-                _ModMult(res, res, temp);
+                _ModSquare(res, temp);
                 for (int k = 0; k < 4; k++) {
                     res[k] = temp[k];
                 }
@@ -524,8 +522,6 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
                         res[k] = temp[k];
                     }
                 }
-
-                step++;
             }
         }
     }
@@ -838,8 +834,9 @@ __device__ void _PointMult(
                 }
 
                 // If bit is set, add P: result = result + P
+                // Use _PointAddMixed since P is in Affine coordinates (PjZ = 1)
                 if (bit == 1) {
-                    _PointAdd(resX, resY, resZ, PjX, PjY, PjZ, tempX, tempY, tempZ);
+                    _PointAddMixed(resX, resY, resZ, PjX, PjY, tempX, tempY, tempZ);
                     for (int m = 0; m < 4; m++) {
                         resX[m] = tempX[m];
                         resY[m] = tempY[m];
