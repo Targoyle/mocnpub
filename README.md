@@ -43,7 +43,7 @@ cargo build --release
 You can customize the build with environment variables:
 
 ```bash
-# Custom keys per thread (default: 1408)
+# Custom keys per thread (default: 1500)
 MAX_KEYS_PER_THREAD=2048 cargo build --release
 ```
 

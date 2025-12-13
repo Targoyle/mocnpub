@@ -13,7 +13,7 @@ param(
     [int]$Seconds = 120,
     [int]$BatchSize = 3584000,
     [int]$ThreadsPerBlock = 128,
-    [int]$KeysPerThread = 1408,
+    [int]$KeysPerThread = 1500,
     [string]$Prefix = "00000000",
     [switch]$SkipBuild = $false
 )

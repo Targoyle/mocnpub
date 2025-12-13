@@ -70,7 +70,7 @@ enum Commands {
 }
 
 /// Get keys_per_thread value determined at build time
-/// Can be specified via MAX_KEYS_PER_THREAD env var (default: 1408)
+/// Can be specified via MAX_KEYS_PER_THREAD env var (default: 1500)
 fn get_max_keys_per_thread() -> u32 {
     env!("MAX_KEYS_PER_THREAD")
         .parse()
