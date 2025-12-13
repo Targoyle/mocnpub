@@ -2,7 +2,7 @@
 
 **作成日**: 2025-11-14
 **最終更新**: 2025-12-13
-**進捗**: Step 0〜5 完了！🎉 3.356B keys/sec 達成！プロジェクト完成 🏁
+**進捗**: Step 0〜5 完了！🎉 3.464B keys/sec 達成！プロジェクト完成 🏁
 
 ---
 
@@ -38,7 +38,8 @@
 | GPU + keys_per_thread 再最適化（1500） | 3.30B keys/sec | 47,143x |
 | GPU + `_PointAddMixed` 最適化（7M+3S） | 3.326B keys/sec | 47,514x |
 | GPU + `__launch_bounds__(128, 5)` | 3.356B keys/sec | 47,937x |
-| **GPU + `_ModInv`/`_PointMult` 最適化** | **3.396B keys/sec** | **48,512x** 🔥🔥🔥 |
+| GPU + `_ModInv`/`_PointMult` 最適化 | 3.396B keys/sec | 48,512x |
+| **GPU + batch_size 再々最適化（4000000）** | **3.464B keys/sec** | **49,486x** 🔥🔥🔥 |
 
 **8文字 prefix が約 6 分で見つかる！** 🎉
 
@@ -178,12 +179,18 @@ SoA（Structure of Arrays）最適化を実装：
 | 1 | keys_per_thread 固定化（ビルド時確定） | ✅ 完了 |
 | 2 | MAX_KEYS_PER_THREAD を環境変数で指定 | ✅ 完了 |
 | 3 | 不要な引数の削除（`--keys-per-thread` 等） | ✅ 完了 |
-| 4 | batch_size 最終調整（3584000、+1.2%） | ✅ 完了 |
+| 4 | batch_size 最終調整（4000000、+2.0%） | ✅ 完了 |
 | 5 | README 整備 | ✅ 完了 |
 
 ---
 
 ### ✅ 完了した最適化
+
+- **batch_size 再々最適化（4000000）**（2025-12-13）🔥
+  - `__launch_bounds__(128, 5)` で Occupancy が 33% → 41% に向上した影響
+  - より多くの並列実行が可能になり、最適な batch_size が増加
+  - **Phase interleaving** 効果：処理フェーズのずれによる負荷分散
+  - 結果：3.396B → **3.464B keys/sec**（+2.0%）🔥
 
 - **`_ModInv`/`_PointMult` 最適化**（2025-12-13）🔥
   - `_ModInv` で `_ModMult(res, res, temp)` → `_ModSquare(res, temp)` に変更（255回の二乗で効果）

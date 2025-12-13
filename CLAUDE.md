@@ -245,7 +245,8 @@
 | GPU + keys_per_thread 再最適化（1500） | 3.30B keys/sec | 47,143x |
 | GPU + `_PointAddMixed` 最適化（7M+3S） | 3.326B keys/sec | 47,514x |
 | GPU + `__launch_bounds__(128, 5)` | 3.356B keys/sec | 47,937x |
-| **GPU + `_ModInv`/`_PointMult` 最適化** | **3.396B keys/sec** | **48,512x** 🔥🔥🔥 |
+| GPU + `_ModInv`/`_PointMult` 最適化 | 3.396B keys/sec | 48,512x |
+| **GPU + batch_size 再々最適化（4000000）** | **3.464B keys/sec** | **49,486x** 🔥🔥🔥 |
 
 **8文字 prefix が約 6 分で見つかる！** 🎉
 
@@ -271,6 +272,7 @@
 | **`_PointAddMixed` 最適化** | **+0.8%**（8M+3S → 7M+3S、X1*H^2 再利用） 🔥 | ✅ 完了 |
 | **`__launch_bounds__(128, 5)` チューニング** | **+0.9%**（レジスタ 128→96、Occupancy 33%→41%） 🔥 | ✅ 完了 |
 | **`_ModInv`/`_PointMult` 最適化** | **+1.2%**（`_ModSquare` 使用、`_PointAddMixed` 使用） 🔥 | ✅ 完了 |
+| **batch_size 再々最適化（4000000）** | **+2.0%**（Occupancy 向上に伴い最適値が増加、phase interleaving） 🔥 | ✅ 完了 |
 
 #### エンドモルフィズムの仕組み
 
@@ -341,7 +343,7 @@ ncu --set full -o profile .\target\release\mocnpub-main.exe --gpu --prefix 0000 
 | 1 | **keys_per_thread 固定化** | ビルド時に確定、ループアンローリング期待 | ✅ 完了 |
 | 2 | **MAX_KEYS_PER_THREAD を環境変数で指定** | `build.rs` で取得、nvcc に `-D` で渡す | ✅ 完了 |
 | 3 | **不要な引数の削除** | `--keys-per-thread` 等を廃止、シンプル化 | ✅ 完了 |
-| 4 | **batch_size 最終調整** | 1146880 → 3584000（+1.2%）| ✅ 完了 |
+| 4 | **batch_size 最終調整** | 3584000 → 4000000（+2.0%）| ✅ 完了 |
 | 5 | **README 整備** | 使い方、ビルド方法、パフォーマンス情報 | ✅ 完了 |
 
 **実装方針**：

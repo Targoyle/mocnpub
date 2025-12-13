@@ -43,8 +43,8 @@ enum Commands {
         #[arg(short, long, default_value = "1")]
         limit: usize,
 
-        /// Batch size (default: 3584000, 400 waves)
-        #[arg(long, default_value = "3584000")]
+        /// Batch size (default: 4000000)
+        #[arg(long, default_value = "4000000")]
         batch_size: usize,
 
         /// GPU threads per block (default: 128, optimal for RTX 5070 Ti)
