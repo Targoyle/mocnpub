@@ -2,7 +2,7 @@
 
 **作成日**: 2025-11-14
 **最終更新**: 2025-12-13
-**進捗**: Step 0〜5 完了！🎉 3.30B keys/sec 達成！プロジェクト完成 🏁
+**進捗**: Step 0〜5 完了！🎉 3.326B keys/sec 達成！プロジェクト完成 🏁
 
 ---
 
@@ -35,7 +35,8 @@
 | GPU + ブランチレス化（_ModSub/_ModAdd） | 3.16B keys/sec | 45,143x |
 | GPU + batch_size 再最適化（3584000） | 3.24B keys/sec | 46,286x |
 | GPU + `__launch_bounds__(128, 4)` | 3.26B keys/sec | 46,571x |
-| **GPU + keys_per_thread 再最適化（1500）** | **3.30B keys/sec** | **47,143x** 🔥🔥🔥 |
+| GPU + keys_per_thread 再最適化（1500） | 3.30B keys/sec | 47,143x |
+| **GPU + `_PointAddMixed` 最適化（7M+3S）** | **3.326B keys/sec** | **47,514x** 🔥🔥🔥 |
 
 **8文字 prefix が約 6 分で見つかる！** 🎉
 
@@ -183,6 +184,13 @@ SoA（Structure of Arrays）最適化を実装：
 ---
 
 ### ✅ 完了した最適化
+
+- **`_PointAddMixed` 最適化**（2025-12-13）🔥
+  - `X1 * H^2` の重複計算を削除（730行目と737行目で同じ計算をしていた）
+  - `X1_H2` 変数に保存して再利用
+  - 乗算回数：8M + 3S → 7M + 3S（12.5%削減）
+  - `__launch_bounds__(128, 4)` のおかげでレジスタ数 128 維持（外すと 130）
+  - 結果：3.30B → **3.326B keys/sec**（+0.8%）🔥
 
 - **`__launch_bounds__(128, 4)` で Occupancy 改善**（2025-12-09）🔥🔥
   - レジスタ数を 130 → 128 に制限（minBlocksPerMultiprocessor = 4）
