@@ -1094,55 +1094,6 @@ extern "C" __global__ void test_point_mult(
     }
 }
 
-/**
- * Test kernel: Mixed Point Addition (Z2=1)
- * Tests _PointAddMixed by computing P1 + P2 where P2 is in Affine (Z=1)
- *
- * Input: P1 in Jacobian (X1, Y1, Z1), P2 in Affine (X2, Y2)
- * Output: P1 + P2 in Affine (x, y)
- */
-extern "C" __global__ void test_point_add_mixed(
-    const uint64_t* input_X1,   // [4] Jacobian X1
-    const uint64_t* input_Y1,   // [4] Jacobian Y1
-    const uint64_t* input_Z1,   // [4] Jacobian Z1
-    const uint64_t* input_X2,   // [4] Affine X2 (Z2=1)
-    const uint64_t* input_Y2,   // [4] Affine Y2
-    uint64_t* output_x,         // [4] Affine result x
-    uint64_t* output_y          // [4] Affine result y
-)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    // Only process first thread (simple test)
-    if (idx != 0) return;
-
-    uint64_t X1[4], Y1[4], Z1[4];
-    uint64_t X2[4], Y2[4];
-    uint64_t X3[4], Y3[4], Z3[4];
-    uint64_t result_x[4], result_y[4];
-
-    // Load inputs
-    for (int i = 0; i < 4; i++) {
-        X1[i] = input_X1[i];
-        Y1[i] = input_Y1[i];
-        Z1[i] = input_Z1[i];
-        X2[i] = input_X2[i];
-        Y2[i] = input_Y2[i];
-    }
-
-    // Perform mixed point addition
-    _PointAddMixed(X1, Y1, Z1, X2, Y2, X3, Y3, Z3);
-
-    // Convert to Affine coordinates
-    _JacobianToAffine(X3, Y3, Z3, result_x, result_y);
-
-    // Store result
-    for (int i = 0; i < 4; i++) {
-        output_x[i] = result_x[i];
-        output_y[i] = result_y[i];
-    }
-}
-
 // ============================================================================
 // Prefix Matching Kernel (GPU-side filtering)
 // ============================================================================
