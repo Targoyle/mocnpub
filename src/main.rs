@@ -1,10 +1,8 @@
 use clap::{Parser, Subcommand};
 use secp256k1::rand::{self, RngCore};
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Secp256k1, SecretKey};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 // Import common functions from lib.rs
@@ -26,7 +24,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Mine npub with specified prefix
+    /// Mine npub with specified prefix (GPU accelerated 🚀)
     Mine {
         /// Prefix to mine (bech32 string following npub1)
         ///
@@ -40,19 +38,11 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
 
-        /// Number of threads (default: auto-detect CPU cores)
-        #[arg(short, long)]
-        threads: Option<usize>,
-
         /// Number of keys to find (0 = unlimited, default: 1)
         #[arg(short, long, default_value = "1")]
         limit: usize,
 
-        /// Enable GPU mode (use CUDA for fast mining)
-        #[arg(long)]
-        gpu: bool,
-
-        /// GPU batch size (default: 3584000, 400 waves)
+        /// Batch size (default: 3584000, 400 waves)
         #[arg(long, default_value = "3584000")]
         batch_size: usize,
 
@@ -84,20 +74,10 @@ fn main() -> io::Result<()> {
         Commands::Mine {
             prefix,
             output,
-            threads,
             limit,
-            gpu,
             batch_size,
             threads_per_block,
-        } => run_mine(
-            prefix,
-            output,
-            threads,
-            limit,
-            gpu,
-            batch_size,
-            threads_per_block,
-        ),
+        } => run_mine(prefix, output, limit, batch_size, threads_per_block),
         Commands::Verify { iterations } => run_verify(iterations),
     }
 }
@@ -106,9 +86,7 @@ fn main() -> io::Result<()> {
 fn run_mine(
     prefix: String,
     output: Option<String>,
-    threads: Option<usize>,
     limit: usize,
-    gpu: bool,
     batch_size: usize,
     threads_per_block: u32,
 ) -> io::Result<()> {
@@ -123,8 +101,7 @@ fn run_mine(
         }
     }
 
-    // Determine thread count (from args or auto-detect CPU cores)
-    let num_threads = threads.unwrap_or_else(num_cpus::get);
+    let keys_per_thread = get_max_keys_per_thread();
 
     println!("🔥 mocnpub - Nostr npub mining 🔥");
     if prefixes.len() == 1 {
@@ -132,36 +109,11 @@ fn run_mine(
     } else {
         println!("Prefixes (OR): {}", prefixes.join(", "));
     }
-
-    // Branch based on GPU or CPU mode
-    if gpu {
-        let keys_per_thread = get_max_keys_per_thread();
-        println!("Mode: GPU (CUDA) 🚀");
-        println!("Batch size: {}", batch_size);
-        println!(
-            "Threads/block: {}, Keys/thread: {} (build-time)",
-            threads_per_block, keys_per_thread
-        );
-        println!(
-            "Limit: {}\n",
-            if limit == 0 {
-                "unlimited".to_string()
-            } else {
-                limit.to_string()
-            }
-        );
-        return run_gpu_mining(
-            &prefixes,
-            limit,
-            batch_size,
-            threads_per_block,
-            keys_per_thread,
-            output.as_deref(),
-        );
-    }
-
-    println!("Mode: CPU");
-    println!("Threads: {}", num_threads);
+    println!("Batch size: {}", batch_size);
+    println!(
+        "Threads/block: {}, Keys/thread: {} (build-time)",
+        threads_per_block, keys_per_thread
+    );
     println!(
         "Limit: {}\n",
         if limit == 0 {
@@ -171,191 +123,18 @@ fn run_mine(
         }
     );
 
-    // Shared counters across all threads
-    let total_count = Arc::new(AtomicU64::new(0));
-    let found_count = Arc::new(AtomicUsize::new(0));
-    let start = Instant::now();
-
-    // Share prefixes via Arc
-    let prefixes = Arc::new(prefixes);
-
-    // Create channel (worker threads → main thread)
-    // (SecretKey, PublicKey, npub, matched_prefix, attempt_count)
-    let (sender, receiver) = mpsc::channel::<(SecretKey, PublicKey, String, String, u64)>();
-
-    // Spawn threads
-    let handles: Vec<_> = (0..num_threads)
-        .map(|_| {
-            let prefixes = Arc::clone(&prefixes);
-            let total_count = Arc::clone(&total_count);
-            let found_count = Arc::clone(&found_count);
-            let sender = sender.clone();
-
-            std::thread::spawn(move || {
-                let secp = Secp256k1::new();
-                let mut local_count = 0u64;
-
-                loop {
-                    // Exit loop if limit reached (0 = unlimited, never exit)
-                    if limit > 0 && found_count.load(Ordering::Relaxed) >= limit {
-                        break;
-                    }
-
-                    let (sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
-                    local_count += 1;
-
-                    // Convert to bech32 format
-                    let npub = pubkey_to_npub(&pk);
-                    // Remove "npub1" to get bech32 body only
-                    let npub_body = &npub[5..]; // "npub1" is 5 chars
-
-                    // Check if any prefix matches (OR logic)
-                    if let Some(matched_prefix) =
-                        prefixes.iter().find(|p| npub_body.starts_with(p.as_str()))
-                    {
-                        // Increment found count
-                        let count = found_count.fetch_add(1, Ordering::Relaxed) + 1;
-
-                        // Get current attempt count
-                        let current_total = total_count.load(Ordering::Relaxed) + local_count;
-
-                        // Send result via channel (including matched_prefix)
-                        if sender
-                            .send((sk, pk, npub.clone(), matched_prefix.clone(), current_total))
-                            .is_err()
-                        {
-                            // Main thread has terminated
-                            break;
-                        }
-
-                        // Exit loop if limit reached (0 = unlimited, never exit)
-                        if limit > 0 && count >= limit {
-                            break;
-                        }
-                    }
-
-                    // Update global counter periodically (every 100 iterations)
-                    if local_count.is_multiple_of(100) {
-                        total_count.fetch_add(100, Ordering::Relaxed);
-                    }
-                }
-
-                // Add remaining count at the end
-                let remainder = local_count % 100;
-                if remainder > 0 {
-                    total_count.fetch_add(remainder, Ordering::Relaxed);
-                }
-            })
-        })
-        .collect();
-
-    // Drop sender (receiver returns None when all worker threads finish)
-    drop(sender);
-
-    // Progress display thread
-    let total_count_progress = Arc::clone(&total_count);
-    let found_count_progress = Arc::clone(&found_count);
-    let limit_progress = limit;
-    let progress_handle = std::thread::spawn(move || {
-        loop {
-            // Exit if limit reached (0 = unlimited, never exit)
-            if limit_progress > 0 && found_count_progress.load(Ordering::Relaxed) >= limit_progress
-            {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let count = total_count_progress.load(Ordering::Relaxed);
-            let found = found_count_progress.load(Ordering::Relaxed);
-            if count > 0 {
-                println!("{} attempts... (found: {})", count, found);
-            }
-        }
-    });
-
-    // Prepare file output (append mode)
-    let mut output_file = if let Some(ref output_path) = output {
-        Some(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(output_path)?,
-        )
-    } else {
-        None
-    };
-
-    // Receive and output results on main thread
-    let mut result_count = 0;
-    while let Ok((sk, pk, npub, matched_prefix, current_total)) = receiver.recv() {
-        result_count += 1;
-        let elapsed = start.elapsed();
-        let elapsed_secs = elapsed.as_secs_f64();
-        let keys_per_sec = current_total as f64 / elapsed_secs;
-
-        let nsec = seckey_to_nsec(&sk);
-        let pk_hex = pk.to_string();
-        let pk_x_only = &pk_hex[2..]; // x-coord only (remove first 2 chars of compressed format)
-
-        // Format result
-        let output_text = format!(
-            "✅ Found #{}! ({} attempts, {} threads)\n\
-             Matched prefix: '{}'\n\n\
-             Elapsed: {:.2} sec\n\
-             Performance: {:.2} keys/sec\n\n\
-             Secret key (hex): {}\n\
-             Secret key (nsec): {}\n\
-             Public key (compressed): {}\n\
-             Public key (x-coord): {}\n\
-             Public key (npub): {}\n\
-{}\n",
-            result_count,
-            current_total,
-            num_threads,
-            matched_prefix,
-            elapsed_secs,
-            keys_per_sec,
-            sk.display_secret(),
-            nsec,
-            pk,
-            pk_x_only,
-            npub,
-            "=".repeat(80)
-        );
-
-        // Output to appropriate destination
-        if let Some(ref mut file) = output_file {
-            // Append to file
-            file.write_all(output_text.as_bytes())?;
-            file.flush()?;
-        }
-        // Also output to stdout (regardless of file output)
-        print!("{}", output_text);
-        io::stdout().flush()?;
-    }
-
-    // Wait for all threads to finish
-    for handle in handles {
-        handle.join().unwrap();
-    }
-    progress_handle.join().unwrap();
-
-    // Display final results
-    let final_count = total_count.load(Ordering::Relaxed);
-    let elapsed = start.elapsed();
-    let elapsed_secs = elapsed.as_secs_f64();
-    println!("\n🎉 Mining complete!");
-    println!("Keys found: {}", result_count);
-    println!("Total attempts: {}", final_count);
-    println!("Elapsed: {:.2} sec", elapsed_secs);
-    if let Some(ref output_path) = output {
-        println!("Results saved to: {}", output_path);
-    }
-
-    Ok(())
+    mining_loop(
+        &prefixes,
+        limit,
+        batch_size,
+        threads_per_block,
+        keys_per_thread,
+        output.as_deref(),
+    )
 }
 
-/// GPU mining mode (GPU-side prefix matching)
-fn run_gpu_mining(
+/// Main mining loop (GPU-side prefix matching)
+fn mining_loop(
     prefixes: &[String],
     limit: usize,
     batch_size: usize,
