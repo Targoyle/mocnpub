@@ -5,7 +5,7 @@
  */
 
 use cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT;
-use cudarc::driver::{CudaContext, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaContext, CudaFunction, CudaModule, LaunchConfig, PushKernelArg};
 use cudarc::nvrtc::Ptx;
 use std::sync::Arc;
 
@@ -429,6 +429,229 @@ pub struct GpuMatch {
     /// Endomorphism type: 0 = original, 1 = β*x, 2 = β²*x
     /// Used to adjust the private key with λ or λ²
     pub endo_type: u32,
+}
+
+/// Double-buffer miner that keeps PTX, streams, and buffers loaded across iterations
+///
+/// This avoids the overhead of loading PTX and allocating memory on every call.
+pub struct DoubleBufferMiner {
+    stream_a: std::sync::Arc<cudarc::driver::CudaStream>,
+    stream_b: std::sync::Arc<cudarc::driver::CudaStream>,
+    _module: std::sync::Arc<CudaModule>, // Keep module alive
+    kernel: CudaFunction,
+    patterns_dev: cudarc::driver::CudaSlice<u64>,
+    masks_dev: cudarc::driver::CudaSlice<u64>,
+    num_prefixes: usize,
+    max_matches: u32,
+    threads_per_block: u32,
+    batch_size: usize,
+    // Pre-allocated buffers for A and B
+    buf_a: StreamBuffer,
+    buf_b: StreamBuffer,
+}
+
+impl DoubleBufferMiner {
+    /// Create a new double-buffer miner with pre-loaded PTX and allocated buffers
+    pub fn new(
+        ctx: &std::sync::Arc<CudaContext>,
+        prefix_bits: &[(u64, u64, u32)],
+        max_matches: u32,
+        threads_per_block: u32,
+        batch_size: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let num_prefixes = prefix_bits.len();
+
+        // Create two streams using fork
+        let stream_a = ctx.default_stream();
+        let stream_b = stream_a.fork()?;
+
+        // Load PTX module (kept alive by _module field)
+        let ptx_code = include_str!(concat!(env!("OUT_DIR"), "/secp256k1.ptx"));
+        let module = ctx.load_module(Ptx::from_src(ptx_code))?;
+        let kernel = module.load_function("generate_pubkeys_with_prefix_match")?;
+
+        // Prepare prefix patterns and masks (shared between streams)
+        let patterns: Vec<u64> = prefix_bits.iter().map(|(p, _, _)| *p).collect();
+        let masks: Vec<u64> = prefix_bits.iter().map(|(_, m, _)| *m).collect();
+
+        let mut patterns_dev = stream_a.alloc_zeros::<u64>(num_prefixes.max(1))?;
+        let mut masks_dev = stream_a.alloc_zeros::<u64>(num_prefixes.max(1))?;
+        if num_prefixes > 0 {
+            stream_a.memcpy_htod(&patterns, &mut patterns_dev)?;
+            stream_a.memcpy_htod(&masks, &mut masks_dev)?;
+        }
+
+        // Pre-allocate buffers for stream A
+        let buf_a = StreamBuffer {
+            base_keys_dev: stream_a.alloc_zeros::<u64>(batch_size * 4)?,
+            matched_base_idx_dev: stream_a.alloc_zeros::<u32>(max_matches as usize)?,
+            matched_offset_dev: stream_a.alloc_zeros::<u32>(max_matches as usize)?,
+            matched_pubkeys_x_dev: stream_a.alloc_zeros::<u64>(max_matches as usize * 4)?,
+            matched_endo_type_dev: stream_a.alloc_zeros::<u32>(max_matches as usize)?,
+            match_count_dev: stream_a.alloc_zeros::<u32>(1)?,
+            num_threads: batch_size,
+        };
+
+        // Pre-allocate buffers for stream B
+        let buf_b = StreamBuffer {
+            base_keys_dev: stream_b.alloc_zeros::<u64>(batch_size * 4)?,
+            matched_base_idx_dev: stream_b.alloc_zeros::<u32>(max_matches as usize)?,
+            matched_offset_dev: stream_b.alloc_zeros::<u32>(max_matches as usize)?,
+            matched_pubkeys_x_dev: stream_b.alloc_zeros::<u64>(max_matches as usize * 4)?,
+            matched_endo_type_dev: stream_b.alloc_zeros::<u32>(max_matches as usize)?,
+            match_count_dev: stream_b.alloc_zeros::<u32>(1)?,
+            num_threads: batch_size,
+        };
+
+        // Sync to ensure all allocations are complete
+        stream_a.synchronize()?;
+        stream_b.synchronize()?;
+
+        Ok(Self {
+            stream_a,
+            stream_b,
+            _module: module,
+            kernel,
+            patterns_dev,
+            masks_dev,
+            num_prefixes,
+            max_matches,
+            threads_per_block,
+            batch_size,
+            buf_a,
+            buf_b,
+        })
+    }
+
+    /// Run one iteration of double-buffer mining
+    ///
+    /// Returns matches from both buffers (A and B)
+    pub fn mine_batch(
+        &mut self,
+        base_keys_a: &[[u64; 4]],
+        base_keys_b: &[[u64; 4]],
+    ) -> Result<(Vec<GpuMatch>, Vec<GpuMatch>), Box<dyn std::error::Error>> {
+        if self.num_prefixes == 0 {
+            return Ok((vec![], vec![]));
+        }
+
+        // 1. Transfer base keys to device (async)
+        let base_keys_a_flat: Vec<u64> =
+            base_keys_a.iter().flat_map(|k| k.iter().copied()).collect();
+        let base_keys_b_flat: Vec<u64> =
+            base_keys_b.iter().flat_map(|k| k.iter().copied()).collect();
+
+        self.stream_a
+            .memcpy_htod(&base_keys_a_flat, &mut self.buf_a.base_keys_dev)?;
+        self.stream_b
+            .memcpy_htod(&base_keys_b_flat, &mut self.buf_b.base_keys_dev)?;
+
+        // 2. Launch kernel A (async)
+        Self::launch_kernel(
+            &self.stream_a,
+            &self.kernel,
+            &mut self.buf_a,
+            &mut self.patterns_dev,
+            &mut self.masks_dev,
+            self.num_prefixes,
+            self.max_matches,
+            self.threads_per_block,
+        )?;
+
+        // 3. Launch kernel B (async)
+        Self::launch_kernel(
+            &self.stream_b,
+            &self.kernel,
+            &mut self.buf_b,
+            &mut self.patterns_dev,
+            &mut self.masks_dev,
+            self.num_prefixes,
+            self.max_matches,
+            self.threads_per_block,
+        )?;
+
+        // 4. Collect results from A (sync + dtoh)
+        let results_a = Self::collect_results(&self.stream_a, &self.buf_a, self.max_matches)?;
+
+        // 5. Collect results from B (sync + dtoh)
+        let results_b = Self::collect_results(&self.stream_b, &self.buf_b, self.max_matches)?;
+
+        Ok((results_a, results_b))
+    }
+
+    fn launch_kernel(
+        stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+        kernel: &CudaFunction,
+        buf: &mut StreamBuffer,
+        patterns_dev: &mut cudarc::driver::CudaSlice<u64>,
+        masks_dev: &mut cudarc::driver::CudaSlice<u64>,
+        num_prefixes: usize,
+        max_matches: u32,
+        threads_per_block: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let num_blocks = (buf.num_threads as u32).div_ceil(threads_per_block);
+        let config = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (threads_per_block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let num_threads_u32 = buf.num_threads as u32;
+        let num_prefixes_u32 = num_prefixes as u32;
+
+        let mut builder = stream.launch_builder(kernel);
+        builder.arg(&mut buf.base_keys_dev);
+        builder.arg(patterns_dev);
+        builder.arg(masks_dev);
+        builder.arg(&num_prefixes_u32);
+        builder.arg(&mut buf.matched_base_idx_dev);
+        builder.arg(&mut buf.matched_offset_dev);
+        builder.arg(&mut buf.matched_pubkeys_x_dev);
+        builder.arg(&mut buf.matched_endo_type_dev);
+        builder.arg(&mut buf.match_count_dev);
+        builder.arg(&num_threads_u32);
+        builder.arg(&max_matches);
+        unsafe {
+            builder.launch(config)?;
+        }
+
+        Ok(())
+    }
+
+    fn collect_results(
+        stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+        buf: &StreamBuffer,
+        max_matches: u32,
+    ) -> Result<Vec<GpuMatch>, Box<dyn std::error::Error>> {
+        stream.synchronize()?;
+
+        let match_count_vec = stream.clone_dtoh(&buf.match_count_dev)?;
+        let match_count = match_count_vec[0].min(max_matches) as usize;
+
+        if match_count == 0 {
+            return Ok(vec![]);
+        }
+
+        let matched_base_idx = stream.clone_dtoh(&buf.matched_base_idx_dev)?;
+        let matched_offset = stream.clone_dtoh(&buf.matched_offset_dev)?;
+        let matched_pubkeys_x_flat = stream.clone_dtoh(&buf.matched_pubkeys_x_dev)?;
+        let matched_endo_type = stream.clone_dtoh(&buf.matched_endo_type_dev)?;
+
+        let mut results = Vec::with_capacity(match_count);
+        for i in 0..match_count {
+            let mut pubkey_x = [0u64; 4];
+            pubkey_x.copy_from_slice(&matched_pubkeys_x_flat[i * 4..(i + 1) * 4]);
+
+            results.push(GpuMatch {
+                base_idx: matched_base_idx[i],
+                offset: matched_offset[i],
+                pubkey_x,
+                endo_type: matched_endo_type[i],
+            });
+        }
+
+        Ok(results)
+    }
 }
 
 /// Generate public keys with GPU-side prefix matching

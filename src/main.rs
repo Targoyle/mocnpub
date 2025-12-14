@@ -7,9 +7,8 @@ use std::time::Instant;
 
 // Import common functions from lib.rs
 use mocnpub_main::gpu::{
-    calculate_optimal_batch_size, generate_pubkeys_with_prefix_match,
-    generate_pubkeys_with_prefix_match_double_buffer, get_max_keys_per_thread, get_sm_count,
-    init_gpu,
+    DoubleBufferMiner, calculate_optimal_batch_size, generate_pubkeys_with_prefix_match,
+    get_max_keys_per_thread, get_sm_count, init_gpu,
 };
 use mocnpub_main::{add_u64x4_scalar, adjust_privkey_for_endomorphism, prefixes_to_bits};
 use mocnpub_main::{bytes_to_u64x4, pubkey_bytes_to_npub, u64x4_to_bytes};
@@ -199,6 +198,22 @@ fn mining_loop(
     // Parameter settings
     let max_matches: u32 = 1000; // generous buffer
 
+    // Create DoubleBufferMiner (PTX, streams, buffers are initialized once)
+    let mut miner = match DoubleBufferMiner::new(
+        &ctx,
+        &prefix_bits,
+        max_matches,
+        threads_per_block,
+        batch_size,
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("❌ Failed to create DoubleBufferMiner: {}", e);
+            std::process::exit(1);
+        }
+    };
+    println!("✅ DoubleBufferMiner initialized (PTX cached, buffers pre-allocated)");
+
     // Secret key buffers (base keys) - double buffer (A and B)
     let mut privkey_bytes_a: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
     let mut privkey_bytes_b: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
@@ -216,15 +231,8 @@ fn mining_loop(
         }
 
         // 2. GPU public key generation + prefix matching (double buffer)
-        // Note: keys_per_thread is fixed to MAX_KEYS_PER_THREAD at compile time
-        let (matches_a, matches_b) = match generate_pubkeys_with_prefix_match_double_buffer(
-            &ctx,
-            &privkeys_u64_a,
-            &privkeys_u64_b,
-            &prefix_bits,
-            max_matches,
-            threads_per_block,
-        ) {
+        // PTX is already loaded, buffers are pre-allocated - just transfer & launch
+        let (matches_a, matches_b) = match miner.mine_batch(&privkeys_u64_a, &privkeys_u64_b) {
             Ok(result) => result,
             Err(e) => {
                 eprintln!("❌ GPU kernel error: {}", e);
