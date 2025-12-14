@@ -7,7 +7,7 @@ use std::time::Instant;
 
 // Import common functions from lib.rs
 use mocnpub_main::gpu::{
-    DoubleBufferMiner, calculate_optimal_batch_size, generate_pubkeys_with_prefix_match,
+    TripleBufferMiner, calculate_optimal_batch_size, generate_pubkeys_with_prefix_match,
     get_max_keys_per_thread, get_sm_count, init_gpu,
 };
 use mocnpub_main::{add_u64x4_scalar, adjust_privkey_for_endomorphism, prefixes_to_bits};
@@ -198,8 +198,8 @@ fn mining_loop(
     // Parameter settings
     let max_matches: u32 = 1000; // generous buffer
 
-    // Create DoubleBufferMiner (PTX, streams, buffers are initialized once)
-    let mut miner = match DoubleBufferMiner::new(
+    // Create TripleBufferMiner (PTX, streams, buffers are initialized once)
+    let mut miner = match TripleBufferMiner::new(
         &ctx,
         &prefix_bits,
         max_matches,
@@ -208,52 +208,59 @@ fn mining_loop(
     ) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("❌ Failed to create DoubleBufferMiner: {}", e);
+            eprintln!("❌ Failed to create TripleBufferMiner: {}", e);
             std::process::exit(1);
         }
     };
-    println!("✅ DoubleBufferMiner initialized (PTX cached, buffers pre-allocated)");
+    println!("✅ TripleBufferMiner initialized (PTX cached, 3 buffers pre-allocated)");
 
-    // Secret key buffers (base keys) - 2 sets for async RNG overlap
-    // "current" = being processed by GPU, "next" = RNG generating while GPU is busy
-    let mut current_bytes_a: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
-    let mut current_bytes_b: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
-    let mut current_u64_a: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
-    let mut current_u64_b: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
+    // Secret key buffers (base keys) - 3 sets for triple buffering
+    // Always 2 buffers in GPU, 1 being processed by CPU (RNG or result processing)
+    let mut host_bytes: [Vec<[u8; 32]>; 3] = [
+        vec![[0u8; 32]; batch_size],
+        vec![[0u8; 32]; batch_size],
+        vec![[0u8; 32]; batch_size],
+    ];
+    let mut host_u64: [Vec<[u64; 4]>; 3] = [
+        vec![[0u64; 4]; batch_size],
+        vec![[0u64; 4]; batch_size],
+        vec![[0u64; 4]; batch_size],
+    ];
 
-    let mut next_bytes_a: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
-    let mut next_bytes_b: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
-    let mut next_u64_a: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
-    let mut next_u64_b: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
-
-    // Generate initial batch (current)
-    for i in 0..batch_size {
-        rng.fill_bytes(&mut current_bytes_a[i]);
-        current_u64_a[i] = bytes_to_u64x4(&current_bytes_a[i]);
-        rng.fill_bytes(&mut current_bytes_b[i]);
-        current_u64_b[i] = bytes_to_u64x4(&current_bytes_b[i]);
-    }
-    println!("🎲 Async RNG overlap enabled (generate next batch while GPU is busy)");
-
-    // Main loop (async RNG pattern: launch → RNG → collect → swap)
-    loop {
-        // 1. Launch kernels (async, non-blocking)
-        if let Err(e) = miner.launch_batch(&current_u64_a, &current_u64_b) {
-            eprintln!("❌ GPU kernel launch error: {}", e);
-            std::process::exit(1);
-        }
-
-        // 2. Generate NEXT batch while GPU is busy! 🔥
-        // This overlaps CPU RNG with GPU kernel execution
+    // Generate initial batches for buffers 0 and 1
+    for buf_idx in 0..2 {
         for i in 0..batch_size {
-            rng.fill_bytes(&mut next_bytes_a[i]);
-            next_u64_a[i] = bytes_to_u64x4(&next_bytes_a[i]);
-            rng.fill_bytes(&mut next_bytes_b[i]);
-            next_u64_b[i] = bytes_to_u64x4(&next_bytes_b[i]);
+            rng.fill_bytes(&mut host_bytes[buf_idx][i]);
+            host_u64[buf_idx][i] = bytes_to_u64x4(&host_bytes[buf_idx][i]);
         }
+    }
 
-        // 3. Collect results from GPU (blocking, waits for kernels)
-        let (matches_a, matches_b) = match miner.collect_batch() {
+    // Launch initial batches (0 and 1 are now in GPU)
+    if let Err(e) = miner.launch_single(0, &host_u64[0]) {
+        eprintln!("❌ GPU kernel launch error: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = miner.launch_single(1, &host_u64[1]) {
+        eprintln!("❌ GPU kernel launch error: {}", e);
+        std::process::exit(1);
+    }
+    println!("🎯 Triple buffering enabled (always 2 kernels in GPU queue)");
+
+    // Generate batch for buffer 2 while 0 and 1 are processing
+    for i in 0..batch_size {
+        rng.fill_bytes(&mut host_bytes[2][i]);
+        host_u64[2][i] = bytes_to_u64x4(&host_bytes[2][i]);
+    }
+
+    // Rotation index: which buffer to collect next
+    // Pattern: collect(N) → launch(N) → RNG(N) → rotate
+    let mut collect_idx = 0usize;
+
+    // Main loop (triple buffer rotation)
+    loop {
+        // 1. Collect results from buffer[collect_idx] (blocking)
+        // Note: While collecting, buffer[(collect_idx+1)%3] is still processing in GPU!
+        let matches = match miner.collect_single(collect_idx) {
             Ok(result) => result,
             Err(e) => {
                 eprintln!("❌ GPU kernel error: {}", e);
@@ -261,15 +268,22 @@ fn mining_loop(
             }
         };
 
-        // Update attempt count (endomorphism checks 3 X-coordinates, x2 for double buffer)
-        total_count += (batch_size as u64) * (keys_per_thread as u64) * 3 * 2;
+        // 2. Launch next batch for this stream (it's now free)
+        // Use the data that was generated 2 rotations ago (ready to use)
+        let ready_data_idx = (collect_idx + 2) % 3;
+        if let Err(e) = miner.launch_single(collect_idx, &host_u64[ready_data_idx]) {
+            eprintln!("❌ GPU kernel launch error: {}", e);
+            std::process::exit(1);
+        }
 
-        // 4. Process matched results from both buffers
-        // Note: results are from "current" batch (not "next" which is still being generated)
-        let all_matches: Vec<_> = matches_a
+        // Update attempt count (endomorphism checks 3 X-coordinates per key)
+        total_count += (batch_size as u64) * (keys_per_thread as u64) * 3;
+
+        // 3. Process matched results BEFORE RNG overwrites the buffer!
+        // Results are from the buffer we just collected (host_u64[collect_idx])
+        let all_matches: Vec<_> = matches
             .into_iter()
-            .map(|m| (m, &current_u64_a))
-            .chain(matches_b.into_iter().map(|m| (m, &current_u64_b)))
+            .map(|m| (m, &host_u64[collect_idx]))
             .collect();
 
         for (m, privkeys_u64) in all_matches {
@@ -383,11 +397,16 @@ fn mining_loop(
             );
         }
 
-        // 5. Swap buffers: next becomes current for next iteration
-        std::mem::swap(&mut current_bytes_a, &mut next_bytes_a);
-        std::mem::swap(&mut current_bytes_b, &mut next_bytes_b);
-        std::mem::swap(&mut current_u64_a, &mut next_u64_a);
-        std::mem::swap(&mut current_u64_b, &mut next_u64_b);
+        // 4. Generate new RNG data into the buffer we just processed
+        // This buffer is now safe to overwrite (results already extracted)
+        // It will be used 2 rotations later
+        for i in 0..batch_size {
+            rng.fill_bytes(&mut host_bytes[collect_idx][i]);
+            host_u64[collect_idx][i] = bytes_to_u64x4(&host_bytes[collect_idx][i]);
+        }
+
+        // 5. Rotate to next buffer
+        collect_idx = (collect_idx + 1) % 3;
     }
 }
 
