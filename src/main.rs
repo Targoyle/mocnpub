@@ -214,25 +214,46 @@ fn mining_loop(
     };
     println!("✅ DoubleBufferMiner initialized (PTX cached, buffers pre-allocated)");
 
-    // Secret key buffers (base keys) - double buffer (A and B)
-    let mut privkey_bytes_a: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
-    let mut privkey_bytes_b: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
-    let mut privkeys_u64_a: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
-    let mut privkeys_u64_b: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
+    // Secret key buffers (base keys) - 2 sets for async RNG overlap
+    // "current" = being processed by GPU, "next" = RNG generating while GPU is busy
+    let mut current_bytes_a: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
+    let mut current_bytes_b: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
+    let mut current_u64_a: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
+    let mut current_u64_b: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
 
-    // Main loop (double-buffer pattern)
+    let mut next_bytes_a: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
+    let mut next_bytes_b: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
+    let mut next_u64_a: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
+    let mut next_u64_b: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
+
+    // Generate initial batch (current)
+    for i in 0..batch_size {
+        rng.fill_bytes(&mut current_bytes_a[i]);
+        current_u64_a[i] = bytes_to_u64x4(&current_bytes_a[i]);
+        rng.fill_bytes(&mut current_bytes_b[i]);
+        current_u64_b[i] = bytes_to_u64x4(&current_bytes_b[i]);
+    }
+    println!("🎲 Async RNG overlap enabled (generate next batch while GPU is busy)");
+
+    // Main loop (async RNG pattern: launch → RNG → collect → swap)
     loop {
-        // 1. Generate random base keys for both buffers (CPU)
-        for i in 0..batch_size {
-            rng.fill_bytes(&mut privkey_bytes_a[i]);
-            privkeys_u64_a[i] = bytes_to_u64x4(&privkey_bytes_a[i]);
-            rng.fill_bytes(&mut privkey_bytes_b[i]);
-            privkeys_u64_b[i] = bytes_to_u64x4(&privkey_bytes_b[i]);
+        // 1. Launch kernels (async, non-blocking)
+        if let Err(e) = miner.launch_batch(&current_u64_a, &current_u64_b) {
+            eprintln!("❌ GPU kernel launch error: {}", e);
+            std::process::exit(1);
         }
 
-        // 2. GPU public key generation + prefix matching (double buffer)
-        // PTX is already loaded, buffers are pre-allocated - just transfer & launch
-        let (matches_a, matches_b) = match miner.mine_batch(&privkeys_u64_a, &privkeys_u64_b) {
+        // 2. Generate NEXT batch while GPU is busy! 🔥
+        // This overlaps CPU RNG with GPU kernel execution
+        for i in 0..batch_size {
+            rng.fill_bytes(&mut next_bytes_a[i]);
+            next_u64_a[i] = bytes_to_u64x4(&next_bytes_a[i]);
+            rng.fill_bytes(&mut next_bytes_b[i]);
+            next_u64_b[i] = bytes_to_u64x4(&next_bytes_b[i]);
+        }
+
+        // 3. Collect results from GPU (blocking, waits for kernels)
+        let (matches_a, matches_b) = match miner.collect_batch() {
             Ok(result) => result,
             Err(e) => {
                 eprintln!("❌ GPU kernel error: {}", e);
@@ -243,12 +264,12 @@ fn mining_loop(
         // Update attempt count (endomorphism checks 3 X-coordinates, x2 for double buffer)
         total_count += (batch_size as u64) * (keys_per_thread as u64) * 3 * 2;
 
-        // 3. Process matched results from both buffers
-        // Helper to identify which buffer a match came from
+        // 4. Process matched results from both buffers
+        // Note: results are from "current" batch (not "next" which is still being generated)
         let all_matches: Vec<_> = matches_a
             .into_iter()
-            .map(|m| (m, &privkeys_u64_a))
-            .chain(matches_b.into_iter().map(|m| (m, &privkeys_u64_b)))
+            .map(|m| (m, &current_u64_a))
+            .chain(matches_b.into_iter().map(|m| (m, &current_u64_b)))
             .collect();
 
         for (m, privkeys_u64) in all_matches {
@@ -361,6 +382,12 @@ fn mining_loop(
                 total_count, mins, secs, keys_per_sec, found_count
             );
         }
+
+        // 5. Swap buffers: next becomes current for next iteration
+        std::mem::swap(&mut current_bytes_a, &mut next_bytes_a);
+        std::mem::swap(&mut current_bytes_b, &mut next_bytes_b);
+        std::mem::swap(&mut current_u64_a, &mut next_u64_a);
+        std::mem::swap(&mut current_u64_b, &mut next_u64_b);
     }
 }
 

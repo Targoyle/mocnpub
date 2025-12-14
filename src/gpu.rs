@@ -579,6 +579,79 @@ impl DoubleBufferMiner {
         Ok((results_a, results_b))
     }
 
+    /// Launch kernels asynchronously (non-blocking)
+    ///
+    /// This transfers base keys and launches both kernels without waiting for completion.
+    /// Call `collect_batch()` later to get results.
+    ///
+    /// Returns Ok(true) if kernels were launched, Ok(false) if no prefixes configured.
+    pub fn launch_batch(
+        &mut self,
+        base_keys_a: &[[u64; 4]],
+        base_keys_b: &[[u64; 4]],
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.num_prefixes == 0 {
+            return Ok(false);
+        }
+
+        // Transfer base keys to device (async)
+        let base_keys_a_flat: Vec<u64> =
+            base_keys_a.iter().flat_map(|k| k.iter().copied()).collect();
+        let base_keys_b_flat: Vec<u64> =
+            base_keys_b.iter().flat_map(|k| k.iter().copied()).collect();
+
+        self.stream_a
+            .memcpy_htod(&base_keys_a_flat, &mut self.buf_a.base_keys_dev)?;
+        self.stream_b
+            .memcpy_htod(&base_keys_b_flat, &mut self.buf_b.base_keys_dev)?;
+
+        // Launch kernel A (async)
+        Self::launch_kernel(
+            &self.stream_a,
+            &self.kernel,
+            &mut self.buf_a,
+            &mut self.patterns_dev,
+            &mut self.masks_dev,
+            self.num_prefixes,
+            self.max_matches,
+            self.threads_per_block,
+        )?;
+
+        // Launch kernel B (async)
+        Self::launch_kernel(
+            &self.stream_b,
+            &self.kernel,
+            &mut self.buf_b,
+            &mut self.patterns_dev,
+            &mut self.masks_dev,
+            self.num_prefixes,
+            self.max_matches,
+            self.threads_per_block,
+        )?;
+
+        Ok(true)
+    }
+
+    /// Collect results from previously launched kernels (blocking)
+    ///
+    /// This synchronizes with GPU and transfers results back to host.
+    /// Must be called after `launch_batch()`.
+    pub fn collect_batch(
+        &self,
+    ) -> Result<(Vec<GpuMatch>, Vec<GpuMatch>), Box<dyn std::error::Error>> {
+        if self.num_prefixes == 0 {
+            return Ok((vec![], vec![]));
+        }
+
+        // Collect results from A (sync + dtoh)
+        let results_a = Self::collect_results(&self.stream_a, &self.buf_a, self.max_matches)?;
+
+        // Collect results from B (sync + dtoh)
+        let results_b = Self::collect_results(&self.stream_b, &self.buf_b, self.max_matches)?;
+
+        Ok((results_a, results_b))
+    }
+
     fn launch_kernel(
         stream: &std::sync::Arc<cudarc::driver::CudaStream>,
         kernel: &CudaFunction,
