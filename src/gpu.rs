@@ -406,6 +406,17 @@ pub fn test_point_mult_gpu(
     Ok((result_x, result_y))
 }
 
+/// Data for a single stream buffer (holds device memory and state)
+struct StreamBuffer {
+    base_keys_dev: cudarc::driver::CudaSlice<u64>,
+    matched_base_idx_dev: cudarc::driver::CudaSlice<u32>,
+    matched_offset_dev: cudarc::driver::CudaSlice<u32>,
+    matched_pubkeys_x_dev: cudarc::driver::CudaSlice<u64>,
+    matched_endo_type_dev: cudarc::driver::CudaSlice<u32>,
+    match_count_dev: cudarc::driver::CudaSlice<u32>,
+    num_threads: usize,
+}
+
 /// Match result from GPU prefix matching
 #[derive(Debug, Clone)]
 pub struct GpuMatch {
@@ -540,6 +551,194 @@ pub fn generate_pubkeys_with_prefix_match(
     }
 
     Ok(results)
+}
+
+/// Generate public keys with double-buffering (2 streams, ping-pong pattern)
+///
+/// This function uses two CUDA streams to overlap kernel execution:
+/// - Launch A → Launch B → Collect A → Collect B
+///
+/// This hides the synchronize() wait time by running the next kernel
+/// while waiting for the previous one.
+///
+/// # Arguments
+/// * `ctx` - GPU context
+/// * `base_keys_a` - Starting private keys for stream A
+/// * `base_keys_b` - Starting private keys for stream B
+/// * `prefix_bits` - Prefix patterns and masks: Vec<(pattern, mask, bit_len)>
+/// * `max_matches` - Maximum number of matches to return (per stream)
+/// * `threads_per_block` - Number of threads per block
+///
+/// # Returns
+/// * `(Vec<GpuMatch>, Vec<GpuMatch>)` - Results from stream A and B
+pub fn generate_pubkeys_with_prefix_match_double_buffer(
+    ctx: &Arc<CudaContext>,
+    base_keys_a: &[[u64; 4]],
+    base_keys_b: &[[u64; 4]],
+    prefix_bits: &[(u64, u64, u32)],
+    max_matches: u32,
+    threads_per_block: u32,
+) -> Result<(Vec<GpuMatch>, Vec<GpuMatch>), Box<dyn std::error::Error>> {
+    let _num_threads_a = base_keys_a.len();
+    let _num_threads_b = base_keys_b.len();
+    let num_prefixes = prefix_bits.len();
+
+    if num_prefixes == 0 {
+        return Ok((vec![], vec![]));
+    }
+
+    // Create two streams using fork (stream_b depends on stream_a's completion)
+    let stream_a = ctx.default_stream();
+    let stream_b = stream_a.fork()?;
+
+    // Load PTX module (shared)
+    let ptx_code = include_str!(concat!(env!("OUT_DIR"), "/secp256k1.ptx"));
+    let module = ctx.load_module(Ptx::from_src(ptx_code))?;
+    let kernel = module.load_function("generate_pubkeys_with_prefix_match")?;
+
+    // Prepare prefix patterns and masks (shared)
+    let patterns: Vec<u64> = prefix_bits.iter().map(|(p, _, _)| *p).collect();
+    let masks: Vec<u64> = prefix_bits.iter().map(|(_, m, _)| *m).collect();
+
+    // Allocate shared prefix buffers (on stream A, but shared)
+    let mut patterns_dev = stream_a.alloc_zeros::<u64>(num_prefixes)?;
+    let mut masks_dev = stream_a.alloc_zeros::<u64>(num_prefixes)?;
+    stream_a.memcpy_htod(&patterns, &mut patterns_dev)?;
+    stream_a.memcpy_htod(&masks, &mut masks_dev)?;
+
+    // Helper: allocate and prepare buffer for a stream
+    let prepare_buffer = |stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+                          base_keys: &[[u64; 4]]|
+     -> Result<StreamBuffer, Box<dyn std::error::Error>> {
+        let num_threads = base_keys.len();
+        if num_threads == 0 {
+            // Return empty buffer
+            return Ok(StreamBuffer {
+                base_keys_dev: stream.alloc_zeros::<u64>(1)?,
+                matched_base_idx_dev: stream.alloc_zeros::<u32>(1)?,
+                matched_offset_dev: stream.alloc_zeros::<u32>(1)?,
+                matched_pubkeys_x_dev: stream.alloc_zeros::<u64>(4)?,
+                matched_endo_type_dev: stream.alloc_zeros::<u32>(1)?,
+                match_count_dev: stream.alloc_zeros::<u32>(1)?,
+                num_threads: 0,
+            });
+        }
+
+        let base_keys_flat: Vec<u64> = base_keys.iter().flat_map(|k| k.iter().copied()).collect();
+
+        let mut base_keys_dev = stream.alloc_zeros::<u64>(num_threads * 4)?;
+        let matched_base_idx_dev = stream.alloc_zeros::<u32>(max_matches as usize)?;
+        let matched_offset_dev = stream.alloc_zeros::<u32>(max_matches as usize)?;
+        let matched_pubkeys_x_dev = stream.alloc_zeros::<u64>(max_matches as usize * 4)?;
+        let matched_endo_type_dev = stream.alloc_zeros::<u32>(max_matches as usize)?;
+        let match_count_dev = stream.alloc_zeros::<u32>(1)?;
+
+        stream.memcpy_htod(&base_keys_flat, &mut base_keys_dev)?;
+
+        Ok(StreamBuffer {
+            base_keys_dev,
+            matched_base_idx_dev,
+            matched_offset_dev,
+            matched_pubkeys_x_dev,
+            matched_endo_type_dev,
+            match_count_dev,
+            num_threads,
+        })
+    };
+
+    // Helper: launch kernel on a stream
+    let mut launch_kernel = |stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+                             buf: &mut StreamBuffer|
+     -> Result<(), Box<dyn std::error::Error>> {
+        if buf.num_threads == 0 {
+            return Ok(());
+        }
+
+        let num_blocks = (buf.num_threads as u32).div_ceil(threads_per_block);
+        let config = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (threads_per_block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let num_threads_u32 = buf.num_threads as u32;
+        let num_prefixes_u32 = num_prefixes as u32;
+
+        let mut builder = stream.launch_builder(&kernel);
+        builder.arg(&mut buf.base_keys_dev);
+        builder.arg(&mut patterns_dev);
+        builder.arg(&mut masks_dev);
+        builder.arg(&num_prefixes_u32);
+        builder.arg(&mut buf.matched_base_idx_dev);
+        builder.arg(&mut buf.matched_offset_dev);
+        builder.arg(&mut buf.matched_pubkeys_x_dev);
+        builder.arg(&mut buf.matched_endo_type_dev);
+        builder.arg(&mut buf.match_count_dev);
+        builder.arg(&num_threads_u32);
+        builder.arg(&max_matches);
+        unsafe {
+            builder.launch(config)?;
+        }
+
+        Ok(())
+    };
+
+    // Helper: collect results from a stream
+    let collect_results = |stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+                           buf: &StreamBuffer|
+     -> Result<Vec<GpuMatch>, Box<dyn std::error::Error>> {
+        if buf.num_threads == 0 {
+            return Ok(vec![]);
+        }
+
+        stream.synchronize()?;
+
+        let match_count_vec = stream.clone_dtoh(&buf.match_count_dev)?;
+        let match_count = match_count_vec[0].min(max_matches) as usize;
+
+        if match_count == 0 {
+            return Ok(vec![]);
+        }
+
+        let matched_base_idx = stream.clone_dtoh(&buf.matched_base_idx_dev)?;
+        let matched_offset = stream.clone_dtoh(&buf.matched_offset_dev)?;
+        let matched_pubkeys_x_flat = stream.clone_dtoh(&buf.matched_pubkeys_x_dev)?;
+        let matched_endo_type = stream.clone_dtoh(&buf.matched_endo_type_dev)?;
+
+        let mut results = Vec::with_capacity(match_count);
+        for i in 0..match_count {
+            let mut pubkey_x = [0u64; 4];
+            pubkey_x.copy_from_slice(&matched_pubkeys_x_flat[i * 4..(i + 1) * 4]);
+
+            results.push(GpuMatch {
+                base_idx: matched_base_idx[i],
+                offset: matched_offset[i],
+                pubkey_x,
+                endo_type: matched_endo_type[i],
+            });
+        }
+
+        Ok(results)
+    };
+
+    // === Double-buffering ping-pong pattern ===
+    // 1. Prepare buffers
+    let mut buf_a = prepare_buffer(&stream_a, base_keys_a)?;
+    let mut buf_b = prepare_buffer(&stream_b, base_keys_b)?;
+
+    // 2. Launch A (async)
+    launch_kernel(&stream_a, &mut buf_a)?;
+
+    // 3. Launch B (async) - runs in parallel with A
+    launch_kernel(&stream_b, &mut buf_b)?;
+
+    // 4. Collect A (sync + dtoh)
+    let results_a = collect_results(&stream_a, &buf_a)?;
+
+    // 5. Collect B (sync + dtoh)
+    let results_b = collect_results(&stream_b, &buf_b)?;
+
+    Ok((results_a, results_b))
 }
 
 #[cfg(test)]

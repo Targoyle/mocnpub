@@ -7,8 +7,9 @@ use std::time::Instant;
 
 // Import common functions from lib.rs
 use mocnpub_main::gpu::{
-    calculate_optimal_batch_size, generate_pubkeys_with_prefix_match, get_max_keys_per_thread,
-    get_sm_count, init_gpu,
+    calculate_optimal_batch_size, generate_pubkeys_with_prefix_match,
+    generate_pubkeys_with_prefix_match_double_buffer, get_max_keys_per_thread, get_sm_count,
+    init_gpu,
 };
 use mocnpub_main::{add_u64x4_scalar, adjust_privkey_for_endomorphism, prefixes_to_bits};
 use mocnpub_main::{bytes_to_u64x4, pubkey_bytes_to_npub, u64x4_to_bytes};
@@ -198,23 +199,28 @@ fn mining_loop(
     // Parameter settings
     let max_matches: u32 = 1000; // generous buffer
 
-    // Secret key buffers (base keys)
-    let mut privkey_bytes: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
-    let mut privkeys_u64: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
+    // Secret key buffers (base keys) - double buffer (A and B)
+    let mut privkey_bytes_a: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
+    let mut privkey_bytes_b: Vec<[u8; 32]> = vec![[0u8; 32]; batch_size];
+    let mut privkeys_u64_a: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
+    let mut privkeys_u64_b: Vec<[u64; 4]> = vec![[0u64; 4]; batch_size];
 
-    // Main loop
+    // Main loop (double-buffer pattern)
     loop {
-        // 1. Generate random base keys (CPU)
+        // 1. Generate random base keys for both buffers (CPU)
         for i in 0..batch_size {
-            rng.fill_bytes(&mut privkey_bytes[i]);
-            privkeys_u64[i] = bytes_to_u64x4(&privkey_bytes[i]);
+            rng.fill_bytes(&mut privkey_bytes_a[i]);
+            privkeys_u64_a[i] = bytes_to_u64x4(&privkey_bytes_a[i]);
+            rng.fill_bytes(&mut privkey_bytes_b[i]);
+            privkeys_u64_b[i] = bytes_to_u64x4(&privkey_bytes_b[i]);
         }
 
-        // 2. GPU public key generation + prefix matching
+        // 2. GPU public key generation + prefix matching (double buffer)
         // Note: keys_per_thread is fixed to MAX_KEYS_PER_THREAD at compile time
-        let matches = match generate_pubkeys_with_prefix_match(
+        let (matches_a, matches_b) = match generate_pubkeys_with_prefix_match_double_buffer(
             &ctx,
-            &privkeys_u64,
+            &privkeys_u64_a,
+            &privkeys_u64_b,
             &prefix_bits,
             max_matches,
             threads_per_block,
@@ -226,11 +232,18 @@ fn mining_loop(
             }
         };
 
-        // Update attempt count (endomorphism checks 3 X-coordinates)
-        total_count += (batch_size as u64) * (keys_per_thread as u64) * 3;
+        // Update attempt count (endomorphism checks 3 X-coordinates, x2 for double buffer)
+        total_count += (batch_size as u64) * (keys_per_thread as u64) * 3 * 2;
 
-        // 3. Process matched results
-        for m in matches {
+        // 3. Process matched results from both buffers
+        // Helper to identify which buffer a match came from
+        let all_matches: Vec<_> = matches_a
+            .into_iter()
+            .map(|m| (m, &privkeys_u64_a))
+            .chain(matches_b.into_iter().map(|m| (m, &privkeys_u64_b)))
+            .collect();
+
+        for (m, privkeys_u64) in all_matches {
             found_count += 1;
 
             // Recover secret key: (base_key + offset) * λ^endo_type mod n
