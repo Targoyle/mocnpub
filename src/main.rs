@@ -7,7 +7,7 @@ use std::time::Instant;
 
 // Import common functions from lib.rs
 use mocnpub_main::gpu::{
-    TripleBufferMiner, calculate_optimal_batch_size, generate_pubkeys_with_prefix_match,
+    SequentialTripleBufferMiner, calculate_optimal_batch_size, generate_pubkeys_with_prefix_match,
     get_max_keys_per_thread, get_sm_count, init_gpu,
 };
 use mocnpub_main::{add_u64x4_scalar, adjust_privkey_for_endomorphism, prefixes_to_bits};
@@ -198,8 +198,9 @@ fn mining_loop(
     // Parameter settings
     let max_matches: u32 = 1000; // generous buffer
 
-    // Create TripleBufferMiner (PTX, streams, buffers are initialized once)
-    let mut miner = match TripleBufferMiner::new(
+    // Create SequentialTripleBufferMiner (PTX, streams, buffers are initialized once)
+    // Uses sequential key strategy: only 32 bytes per buffer instead of batch_size * 32!
+    let mut miner = match SequentialTripleBufferMiner::new(
         &ctx,
         &prefix_bits,
         max_matches,
@@ -208,37 +209,27 @@ fn mining_loop(
     ) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("❌ Failed to create TripleBufferMiner: {}", e);
+            eprintln!("❌ Failed to create SequentialTripleBufferMiner: {}", e);
             std::process::exit(1);
         }
     };
-    println!("✅ TripleBufferMiner initialized (PTX cached, 3 buffers pre-allocated)");
+    println!("✅ SequentialTripleBufferMiner initialized (VRAM-efficient: 32 bytes per buffer!)");
 
-    // Secret key buffers (base keys) - 3 sets for triple buffering
-    // Always 2 buffers in GPU, 1 being processed by CPU (RNG or result processing)
-    let mut host_bytes: [Vec<[u8; 32]>; 3] = [
-        vec![[0u8; 32]; batch_size],
-        vec![[0u8; 32]; batch_size],
-        vec![[0u8; 32]; batch_size],
-    ];
-    let mut host_u64: [Vec<[u64; 4]>; 3] = [
-        vec![[0u64; 4]; batch_size],
-        vec![[0u64; 4]; batch_size],
-        vec![[0u64; 4]; batch_size],
-    ];
+    // Secret key buffers (base keys) - 3 single keys for triple buffering
+    // Sequential strategy: each buffer only needs ONE base key (32 bytes)!
+    let mut host_bytes: [[u8; 32]; 3] = [[0u8; 32]; 3];
+    let mut host_u64: [[u64; 4]; 3] = [[0u64; 4]; 3];
 
     // Generate and launch ALL 3 initial batches
     for buf_idx in 0..3 {
-        for i in 0..batch_size {
-            rng.fill_bytes(&mut host_bytes[buf_idx][i]);
-            host_u64[buf_idx][i] = bytes_to_u64x4(&host_bytes[buf_idx][i]);
-        }
+        rng.fill_bytes(&mut host_bytes[buf_idx]);
+        host_u64[buf_idx] = bytes_to_u64x4(&host_bytes[buf_idx]);
         if let Err(e) = miner.launch_single(buf_idx, &host_u64[buf_idx]) {
             eprintln!("❌ GPU kernel launch error: {}", e);
             std::process::exit(1);
         }
     }
-    println!("🎯 Triple buffering enabled (always 2 kernels in GPU queue)");
+    println!("🎯 Triple buffering enabled (sequential key strategy, 2 kernels in GPU queue)");
 
     // Rotation index: which buffer to collect next
     // Pattern: collect(N) → launch(N) → RNG(N) → rotate
@@ -260,14 +251,14 @@ fn mining_loop(
         total_count += (batch_size as u64) * (keys_per_thread as u64) * 3;
 
         // 2. Process matched results
-        // Now we use m.base_key directly (returned from GPU), no need for host-side buffer lookup
+        // Sequential strategy: m.base_key is already the actual secret key (computed in GPU)
         for m in matches {
             found_count += 1;
 
-            // Recover secret key: (base_key + offset) * λ^endo_type mod n
-            // endo_type: 0 = original, 1 = λ*k, 2 = λ²*k (for endomorphism)
-            let key_with_offset = add_u64x4_scalar(&m.base_key, m.offset);
-            let actual_key_u64 = adjust_privkey_for_endomorphism(&key_with_offset, m.endo_type);
+            // Adjust for endomorphism: actual_key * λ^endo_type mod n
+            // endo_type: 0 = original, 1 = λ*k, 2 = λ²*k
+            // Note: m.base_key is already base_key + global_offset + key_offset (computed in GPU)
+            let actual_key_u64 = adjust_privkey_for_endomorphism(&m.base_key, m.endo_type);
             let actual_key_bytes = u64x4_to_bytes(&actual_key_u64);
 
             // Generate nsec from secret key
@@ -371,14 +362,12 @@ fn mining_loop(
             );
         }
 
-        // 3. Generate new RNG data for this buffer (it's now safe to overwrite)
+        // 3. Generate new RNG data for this buffer (only ONE key needed!)
         // While RNG runs, streams (collect_idx+1) and (collect_idx+2) are still in GPU
-        for i in 0..batch_size {
-            rng.fill_bytes(&mut host_bytes[collect_idx][i]);
-            host_u64[collect_idx][i] = bytes_to_u64x4(&host_bytes[collect_idx][i]);
-        }
+        rng.fill_bytes(&mut host_bytes[collect_idx]);
+        host_u64[collect_idx] = bytes_to_u64x4(&host_bytes[collect_idx]);
 
-        // 4. Launch with fresh RNG data (each stream uses its own buffer)
+        // 4. Launch with fresh RNG data (each stream uses its own single key)
         if let Err(e) = miner.launch_single(collect_idx, &host_u64[collect_idx]) {
             eprintln!("❌ GPU kernel launch error: {}", e);
             std::process::exit(1);

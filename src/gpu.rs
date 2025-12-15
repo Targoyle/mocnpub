@@ -930,6 +930,213 @@ impl TripleBufferMiner {
     }
 }
 
+/// Data for a single stream buffer (sequential key strategy)
+struct SequentialStreamBuffer {
+    base_key_dev: cudarc::driver::CudaSlice<u64>, // Only 4 u64! (32 bytes)
+    matched_base_idx_dev: cudarc::driver::CudaSlice<u32>,
+    matched_offset_dev: cudarc::driver::CudaSlice<u32>,
+    matched_pubkeys_x_dev: cudarc::driver::CudaSlice<u64>,
+    matched_secret_keys_dev: cudarc::driver::CudaSlice<u64>,
+    matched_endo_type_dev: cudarc::driver::CudaSlice<u32>,
+    match_count_dev: cudarc::driver::CudaSlice<u32>,
+    num_threads: usize,
+}
+
+/// Triple-buffer miner with sequential key strategy (VRAM-efficient)
+///
+/// Uses a single base_key per batch instead of batch_size keys:
+/// - VRAM reduction: batch_size * 32 bytes -> 32 bytes per buffer
+/// - Branch divergence reduction: sequential keys have similar upper bits
+///
+/// Uses 3 buffers for gap-free GPU utilization (same as TripleBufferMiner)
+pub struct SequentialTripleBufferMiner {
+    streams: Vec<std::sync::Arc<cudarc::driver::CudaStream>>,
+    _module: std::sync::Arc<CudaModule>,
+    kernel: CudaFunction,
+    patterns_dev: cudarc::driver::CudaSlice<u64>,
+    masks_dev: cudarc::driver::CudaSlice<u64>,
+    num_prefixes: usize,
+    max_matches: u32,
+    threads_per_block: u32,
+    batch_size: usize,
+    bufs: Vec<SequentialStreamBuffer>,
+}
+
+impl SequentialTripleBufferMiner {
+    /// Create a new sequential triple-buffer miner
+    pub fn new(
+        ctx: &std::sync::Arc<CudaContext>,
+        prefix_bits: &[(u64, u64, u32)],
+        max_matches: u32,
+        threads_per_block: u32,
+        batch_size: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let num_prefixes = prefix_bits.len();
+
+        // Create three streams using fork
+        let stream_0 = ctx.default_stream();
+        let stream_1 = stream_0.fork()?;
+        let stream_2 = stream_1.fork()?;
+        let streams = vec![stream_0.clone(), stream_1, stream_2];
+
+        // Load PTX module
+        let ptx_code = include_str!(concat!(env!("OUT_DIR"), "/secp256k1.ptx"));
+        let module = ctx.load_module(Ptx::from_src(ptx_code))?;
+        let kernel = module.load_function("generate_pubkeys_sequential")?;
+
+        // Prepare prefix patterns and masks
+        let patterns: Vec<u64> = prefix_bits.iter().map(|(p, _, _)| *p).collect();
+        let masks: Vec<u64> = prefix_bits.iter().map(|(_, m, _)| *m).collect();
+
+        let mut patterns_dev = stream_0.alloc_zeros::<u64>(num_prefixes.max(1))?;
+        let mut masks_dev = stream_0.alloc_zeros::<u64>(num_prefixes.max(1))?;
+        if num_prefixes > 0 {
+            stream_0.memcpy_htod(&patterns, &mut patterns_dev)?;
+            stream_0.memcpy_htod(&masks, &mut masks_dev)?;
+        }
+
+        // Pre-allocate buffers for all 3 streams
+        // Note: base_key_dev is only 4 u64 (32 bytes) instead of batch_size * 4!
+        let mut bufs = Vec::with_capacity(3);
+        for stream in &streams {
+            let buf = SequentialStreamBuffer {
+                base_key_dev: stream.alloc_zeros::<u64>(4)?, // Only 32 bytes!
+                matched_base_idx_dev: stream.alloc_zeros::<u32>(max_matches as usize)?,
+                matched_offset_dev: stream.alloc_zeros::<u32>(max_matches as usize)?,
+                matched_pubkeys_x_dev: stream.alloc_zeros::<u64>(max_matches as usize * 4)?,
+                matched_secret_keys_dev: stream.alloc_zeros::<u64>(max_matches as usize * 4)?,
+                matched_endo_type_dev: stream.alloc_zeros::<u32>(max_matches as usize)?,
+                match_count_dev: stream.alloc_zeros::<u32>(1)?,
+                num_threads: batch_size,
+            };
+            bufs.push(buf);
+        }
+
+        // Sync to ensure all allocations are complete
+        for stream in &streams {
+            stream.synchronize()?;
+        }
+
+        Ok(Self {
+            streams,
+            _module: module,
+            kernel,
+            patterns_dev,
+            masks_dev,
+            num_prefixes,
+            max_matches,
+            threads_per_block,
+            batch_size,
+            bufs,
+        })
+    }
+
+    /// Launch a single buffer's kernel asynchronously (non-blocking)
+    ///
+    /// # Arguments
+    /// * `idx` - Buffer index (0, 1, or 2)
+    /// * `base_key` - Single base key for this batch (all threads compute from this)
+    pub fn launch_single(
+        &mut self,
+        idx: usize,
+        base_key: &[u64; 4],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.num_prefixes == 0 {
+            return Ok(());
+        }
+
+        let stream = &self.streams[idx];
+        let buf = &mut self.bufs[idx];
+
+        // Reset match_count to 0
+        stream.memcpy_htod(&[0u32], &mut buf.match_count_dev)?;
+
+        // Transfer single base key to device (only 32 bytes!)
+        stream.memcpy_htod(base_key.as_slice(), &mut buf.base_key_dev)?;
+
+        // Launch kernel
+        let num_blocks = (buf.num_threads as u32).div_ceil(self.threads_per_block);
+        let config = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (self.threads_per_block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let num_threads_u32 = buf.num_threads as u32;
+        let num_prefixes_u32 = self.num_prefixes as u32;
+
+        let mut builder = stream.launch_builder(&self.kernel);
+        builder.arg(&mut buf.base_key_dev);
+        builder.arg(&mut self.patterns_dev);
+        builder.arg(&mut self.masks_dev);
+        builder.arg(&num_prefixes_u32);
+        builder.arg(&mut buf.matched_base_idx_dev);
+        builder.arg(&mut buf.matched_offset_dev);
+        builder.arg(&mut buf.matched_pubkeys_x_dev);
+        builder.arg(&mut buf.matched_secret_keys_dev);
+        builder.arg(&mut buf.matched_endo_type_dev);
+        builder.arg(&mut buf.match_count_dev);
+        builder.arg(&num_threads_u32);
+        builder.arg(&self.max_matches);
+        unsafe {
+            builder.launch(config)?;
+        }
+
+        Ok(())
+    }
+
+    /// Collect results from a single buffer (blocking)
+    ///
+    /// # Arguments
+    /// * `idx` - Buffer index (0, 1, or 2)
+    pub fn collect_single(&self, idx: usize) -> Result<Vec<GpuMatch>, Box<dyn std::error::Error>> {
+        if self.num_prefixes == 0 {
+            return Ok(vec![]);
+        }
+
+        let stream = &self.streams[idx];
+        let buf = &self.bufs[idx];
+
+        stream.synchronize()?;
+
+        let match_count_vec = stream.clone_dtoh(&buf.match_count_dev)?;
+        let match_count = match_count_vec[0].min(self.max_matches) as usize;
+
+        if match_count == 0 {
+            return Ok(vec![]);
+        }
+
+        let matched_base_idx = stream.clone_dtoh(&buf.matched_base_idx_dev)?;
+        let matched_offset = stream.clone_dtoh(&buf.matched_offset_dev)?;
+        let matched_pubkeys_x_flat = stream.clone_dtoh(&buf.matched_pubkeys_x_dev)?;
+        let matched_secret_keys_flat = stream.clone_dtoh(&buf.matched_secret_keys_dev)?;
+        let matched_endo_type = stream.clone_dtoh(&buf.matched_endo_type_dev)?;
+
+        let mut results = Vec::with_capacity(match_count);
+        for i in 0..match_count {
+            let mut pubkey_x = [0u64; 4];
+            pubkey_x.copy_from_slice(&matched_pubkeys_x_flat[i * 4..(i + 1) * 4]);
+            let mut secret_key = [0u64; 4];
+            secret_key.copy_from_slice(&matched_secret_keys_flat[i * 4..(i + 1) * 4]);
+
+            results.push(GpuMatch {
+                base_idx: matched_base_idx[i],
+                offset: matched_offset[i],
+                pubkey_x,
+                base_key: secret_key, // This is the actual secret key
+                endo_type: matched_endo_type[i],
+            });
+        }
+
+        Ok(results)
+    }
+
+    /// Get the batch size
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+}
+
 /// Generate public keys with GPU-side prefix matching
 ///
 /// This function generates public keys using Montgomery's Trick and filters
@@ -1051,6 +1258,134 @@ pub fn generate_pubkeys_with_prefix_match(
             offset: matched_offset[i],
             pubkey_x,
             base_key,
+            endo_type: matched_endo_type[i],
+        });
+    }
+
+    Ok(results)
+}
+
+/// Generate public keys with sequential key strategy (VRAM-efficient)
+///
+/// This function uses a single base_key and computes sequential secret keys on GPU:
+///   thread i computes keys: base_key + i * MAX_KEYS_PER_THREAD + 0, 1, 2, ...
+///
+/// Benefits:
+///   1. VRAM reduction: batch_size * 32 bytes -> 32 bytes
+///   2. Branch divergence reduction: sequential keys have similar upper bits
+///   3. Enables larger batch_size and MAX_KEYS_PER_THREAD
+///
+/// # Arguments
+/// * `ctx` - GPU context
+/// * `base_key` - Single starting private key (all threads compute from this)
+/// * `num_threads` - Number of threads (batch_size)
+/// * `prefix_bits` - Prefix patterns and masks: Vec<(pattern, mask, bit_len)>
+/// * `max_matches` - Maximum number of matches to return
+/// * `threads_per_block` - Number of threads per block
+///
+/// # Returns
+/// * `Vec<GpuMatch>` - Matching keys with their indices and actual secret keys
+pub fn generate_pubkeys_sequential(
+    ctx: &Arc<CudaContext>,
+    base_key: &[u64; 4],
+    num_threads: usize,
+    prefix_bits: &[(u64, u64, u32)],
+    max_matches: u32,
+    threads_per_block: u32,
+) -> Result<Vec<GpuMatch>, Box<dyn std::error::Error>> {
+    let num_prefixes = prefix_bits.len();
+
+    if num_threads == 0 || num_prefixes == 0 {
+        return Ok(vec![]);
+    }
+
+    // Get default stream
+    let stream = ctx.default_stream();
+
+    // Load PTX module
+    let ptx_code = include_str!(concat!(env!("OUT_DIR"), "/secp256k1.ptx"));
+    let module = ctx.load_module(Ptx::from_src(ptx_code))?;
+    let kernel = module.load_function("generate_pubkeys_sequential")?;
+
+    // Prepare prefix patterns and masks
+    let patterns: Vec<u64> = prefix_bits.iter().map(|(p, _, _)| *p).collect();
+    let masks: Vec<u64> = prefix_bits.iter().map(|(_, m, _)| *m).collect();
+
+    // Allocate device memory for inputs (only 4 u64 for base_key!)
+    let mut base_key_dev = stream.alloc_zeros::<u64>(4)?;
+    let mut patterns_dev = stream.alloc_zeros::<u64>(num_prefixes)?;
+    let mut masks_dev = stream.alloc_zeros::<u64>(num_prefixes)?;
+
+    // Allocate device memory for outputs
+    let mut matched_base_idx_dev = stream.alloc_zeros::<u32>(max_matches as usize)?;
+    let mut matched_offset_dev = stream.alloc_zeros::<u32>(max_matches as usize)?;
+    let mut matched_pubkeys_x_dev = stream.alloc_zeros::<u64>(max_matches as usize * 4)?;
+    let mut matched_secret_keys_dev = stream.alloc_zeros::<u64>(max_matches as usize * 4)?;
+    let mut matched_endo_type_dev = stream.alloc_zeros::<u32>(max_matches as usize)?;
+    let mut match_count_dev = stream.alloc_zeros::<u32>(1)?;
+
+    // Copy inputs to device
+    stream.memcpy_htod(base_key.as_slice(), &mut base_key_dev)?;
+    stream.memcpy_htod(&patterns, &mut patterns_dev)?;
+    stream.memcpy_htod(&masks, &mut masks_dev)?;
+
+    // Calculate grid and block dimensions
+    let num_blocks = (num_threads as u32).div_ceil(threads_per_block);
+
+    let config = LaunchConfig {
+        grid_dim: (num_blocks, 1, 1),
+        block_dim: (threads_per_block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    // Launch kernel
+    let num_threads_u32 = num_threads as u32;
+    let num_prefixes_u32 = num_prefixes as u32;
+    let mut builder = stream.launch_builder(&kernel);
+    builder.arg(&mut base_key_dev);
+    builder.arg(&mut patterns_dev);
+    builder.arg(&mut masks_dev);
+    builder.arg(&num_prefixes_u32);
+    builder.arg(&mut matched_base_idx_dev);
+    builder.arg(&mut matched_offset_dev);
+    builder.arg(&mut matched_pubkeys_x_dev);
+    builder.arg(&mut matched_secret_keys_dev);
+    builder.arg(&mut matched_endo_type_dev);
+    builder.arg(&mut match_count_dev);
+    builder.arg(&num_threads_u32);
+    builder.arg(&max_matches);
+    unsafe {
+        builder.launch(config)?;
+    }
+
+    // Copy match count back
+    let match_count_vec = stream.clone_dtoh(&match_count_dev)?;
+    let match_count = match_count_vec[0].min(max_matches) as usize;
+
+    if match_count == 0 {
+        return Ok(vec![]);
+    }
+
+    // Copy results back
+    let matched_base_idx = stream.clone_dtoh(&matched_base_idx_dev)?;
+    let matched_offset = stream.clone_dtoh(&matched_offset_dev)?;
+    let matched_pubkeys_x_flat = stream.clone_dtoh(&matched_pubkeys_x_dev)?;
+    let matched_secret_keys_flat = stream.clone_dtoh(&matched_secret_keys_dev)?;
+    let matched_endo_type = stream.clone_dtoh(&matched_endo_type_dev)?;
+
+    // Build result vector
+    let mut results = Vec::with_capacity(match_count);
+    for i in 0..match_count {
+        let mut pubkey_x = [0u64; 4];
+        pubkey_x.copy_from_slice(&matched_pubkeys_x_flat[i * 4..(i + 1) * 4]);
+        let mut secret_key = [0u64; 4];
+        secret_key.copy_from_slice(&matched_secret_keys_flat[i * 4..(i + 1) * 4]);
+
+        results.push(GpuMatch {
+            base_idx: matched_base_idx[i],
+            offset: matched_offset[i],
+            pubkey_x,
+            base_key: secret_key, // This is the actual secret key now
             endo_type: matched_endo_type[i],
         });
     }
@@ -2153,6 +2488,171 @@ mod tests {
             println!("  ✅ All verified matches start with prefix '{}'", prefix);
         } else {
             println!("  ℹ️ No matches found (expected with longer prefix)");
+        }
+    }
+
+    #[test]
+    fn test_gpu_sequential_basic() {
+        use crate::{prefix_to_bits, pubkey_bytes_to_npub, u64x4_to_bytes};
+
+        let ctx = init_gpu().expect("Failed to initialize GPU");
+
+        // Use prefix "c" (1 char = 5 bits) which has ~1/32 chance of matching
+        let prefix = "c";
+        let prefix_bits = vec![prefix_to_bits(prefix)];
+
+        // Single base key - all threads compute sequential keys from this
+        let base_key: [u64; 4] = [2, 0, 0, 0];
+        let num_threads = 64;
+        let max_matches = 1000u32;
+        let threads_per_block = 64u32;
+
+        let matches = generate_pubkeys_sequential(
+            &ctx,
+            &base_key,
+            num_threads,
+            &prefix_bits,
+            max_matches,
+            threads_per_block,
+        )
+        .expect("GPU sequential prefix match failed");
+
+        let keys_per_thread = get_max_keys_per_thread();
+        println!("\nGPU Sequential Key Test:");
+        println!("  Prefix: '{}'", prefix);
+        println!("  Base key: {:?}", base_key);
+        println!("  Num threads: {}", num_threads);
+        println!("  Keys per thread: {}", keys_per_thread);
+        println!("  Total keys: {}", num_threads * keys_per_thread as usize);
+        println!("  Matches found: {}", matches.len());
+
+        // Verify at least some matches were found
+        assert!(
+            !matches.is_empty(),
+            "Should find at least some matches with prefix 'c'"
+        );
+
+        // Verify the first few matches are correct
+        for (i, m) in matches.iter().take(5).enumerate() {
+            let pubkey_bytes = u64x4_to_bytes(&m.pubkey_x);
+            let npub = pubkey_bytes_to_npub(&pubkey_bytes);
+            let npub_body = &npub[5..]; // Remove "npub1"
+
+            // Compute expected secret key for verification
+            let expected_offset =
+                (m.base_idx as u64) * (keys_per_thread as u64) + (m.offset as u64);
+            let expected_key: [u64; 4] = [
+                base_key[0] + expected_offset,
+                base_key[1],
+                base_key[2],
+                base_key[3],
+            ];
+
+            println!(
+                "  Match {}: base_idx={}, offset={}, endo={}, npub={}...",
+                i,
+                m.base_idx,
+                m.offset,
+                m.endo_type,
+                &npub_body[..10]
+            );
+            println!("    Secret key returned: {:?}", m.base_key);
+            println!("    Expected key: {:?}", expected_key);
+
+            // Verify the npub actually starts with the prefix
+            assert!(
+                npub_body.starts_with(prefix),
+                "npub {} should start with prefix '{}'",
+                npub_body,
+                prefix
+            );
+
+            // Verify the secret key is correctly computed
+            assert_eq!(
+                m.base_key, expected_key,
+                "Secret key should match expected: {:?} vs {:?}",
+                m.base_key, expected_key
+            );
+        }
+
+        println!(
+            "  ✅ All verified matches start with prefix '{}' and have correct secret keys",
+            prefix
+        );
+    }
+
+    #[test]
+    fn test_gpu_sequential_verify_secret_key() {
+        use crate::{prefix_to_bits, pubkey_bytes_to_npub, seckey_to_nsec, u64x4_to_bytes};
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+        let ctx = init_gpu().expect("Failed to initialize GPU");
+
+        // Use an easy prefix to find matches quickly
+        let prefix = "0";
+        let prefix_bits = vec![prefix_to_bits(prefix)];
+
+        let base_key: [u64; 4] = [1, 0, 0, 0];
+        let num_threads = 128;
+        let max_matches = 100u32;
+        let threads_per_block = 128u32;
+
+        let matches = generate_pubkeys_sequential(
+            &ctx,
+            &base_key,
+            num_threads,
+            &prefix_bits,
+            max_matches,
+            threads_per_block,
+        )
+        .expect("GPU sequential prefix match failed");
+
+        println!("\nGPU Sequential Key Verification Test:");
+        println!("  Matches found: {}", matches.len());
+
+        assert!(!matches.is_empty(), "Should find at least one match");
+
+        // Verify the first match by computing pubkey from secret key
+        let m = &matches[0];
+
+        // Convert GPU secret key to bytes (little-endian limbs to big-endian bytes)
+        let secret_bytes = u64x4_to_bytes(&m.base_key);
+
+        // Apply endomorphism adjustment if needed
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&secret_bytes).expect("Invalid secret key");
+        let pubkey = PublicKey::from_secret_key(&secp, &secret_key);
+        let pubkey_bytes: [u8; 32] = pubkey.x_only_public_key().0.serialize();
+
+        // Convert to npub
+        let npub = pubkey_bytes_to_npub(&pubkey_bytes);
+        let nsec = seckey_to_nsec(&secret_key);
+
+        println!("  First match:");
+        println!(
+            "    base_idx={}, offset={}, endo_type={}",
+            m.base_idx, m.offset, m.endo_type
+        );
+        println!("    nsec: {}", nsec);
+        println!("    npub: {}", npub);
+
+        // For endo_type=0, the npub from our secret key should match
+        if m.endo_type == 0 {
+            let npub_body = &npub[5..]; // Remove "npub1"
+            assert!(
+                npub_body.starts_with(prefix),
+                "npub {} should start with prefix '{}' for endo_type=0",
+                npub_body,
+                prefix
+            );
+            println!("  ✅ Secret key verification passed for endo_type=0");
+        } else {
+            // For endo_type 1 or 2, we need to adjust the secret key with λ
+            // This is a known limitation - for now just verify the match was found
+            println!(
+                "  ℹ️ endo_type={}, skipping direct verification (needs λ adjustment)",
+                m.endo_type
+            );
         }
     }
 }

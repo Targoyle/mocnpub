@@ -1188,3 +1188,201 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_with_prefi
         }
     }
 }
+
+// ============================================================================
+// Sequential Key Strategy Kernel (VRAM-efficient version)
+// ============================================================================
+
+/**
+ * Generate public keys using sequential key strategy
+ *
+ * This kernel uses a single base_key and computes sequential secret keys:
+ *   thread i computes keys: base_key + i * MAX_KEYS_PER_THREAD + 0, 1, 2, ...
+ *
+ * Benefits:
+ *   1. VRAM reduction: batch_size * 32 bytes -> 32 bytes (single key)
+ *   2. Branch divergence reduction: sequential keys have similar upper bits
+ *   3. Enables larger batch_size and MAX_KEYS_PER_THREAD
+ *
+ * Input:
+ *   - base_key: single starting private key [4 limbs]
+ *   - patterns: prefix bit patterns [num_prefixes]
+ *   - masks: prefix bit masks [num_prefixes]
+ *   - num_prefixes: number of prefixes to match
+ *   - num_threads: number of threads
+ *   - max_matches: maximum number of matches to store
+ *
+ * Output:
+ *   - matched_base_idx: thread index of matched keys [max_matches]
+ *   - matched_offset: key offset within thread [max_matches]
+ *   - matched_pubkeys_x: x-coordinates of matched pubkeys [max_matches * 4]
+ *   - matched_secret_keys: actual secret keys (base_key + global_offset + i) [max_matches * 4]
+ *   - matched_endo_type: endomorphism type (0=original, 1=β, 2=β²) [max_matches]
+ *   - match_count: number of matches found (atomic counter)
+ */
+extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential(
+    const uint64_t* base_key,      // Single base key [4 limbs]
+    const uint64_t* patterns,
+    const uint64_t* masks,
+    uint32_t num_prefixes,
+    uint32_t* matched_base_idx,
+    uint32_t* matched_offset,
+    uint64_t* matched_pubkeys_x,
+    uint64_t* matched_secret_keys, // Actual secret keys (not base_key)
+    uint32_t* matched_endo_type,
+    uint32_t* match_count,
+    uint32_t num_threads,
+    uint32_t max_matches
+)
+{
+    // === Load patterns and masks into shared memory for fast access ===
+    __shared__ uint64_t s_patterns[64];
+    __shared__ uint64_t s_masks[64];
+
+    if (threadIdx.x < num_prefixes && threadIdx.x < 64) {
+        s_patterns[threadIdx.x] = patterns[threadIdx.x];
+        s_masks[threadIdx.x] = masks[threadIdx.x];
+    }
+    __syncthreads();
+
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_threads) return;
+
+    // Local arrays for storing intermediate Jacobian coordinates
+    uint64_t X_arr[MAX_KEYS_PER_THREAD][4];
+    uint64_t Y_arr[MAX_KEYS_PER_THREAD][4];
+    uint64_t Z_arr[MAX_KEYS_PER_THREAD][4];
+    uint64_t c[MAX_KEYS_PER_THREAD][4];
+
+    const uint32_t n = MAX_KEYS_PER_THREAD;
+
+    // === Compute starting secret key: base_key + idx * MAX_KEYS_PER_THREAD ===
+    uint64_t global_offset = (uint64_t)idx * MAX_KEYS_PER_THREAD;
+    uint64_t k[4];
+
+    // Add global_offset to base_key (with carry propagation)
+    uint64_t sum = base_key[0] + global_offset;
+    uint64_t carry = (sum < base_key[0]) ? 1 : 0;
+    k[0] = sum;
+
+    for (int i = 1; i < 4; i++) {
+        sum = base_key[i] + carry;
+        carry = (sum < carry) ? 1 : 0;
+        k[i] = sum;
+    }
+
+    // Save starting key for this thread (needed for match reporting)
+    uint64_t thread_base_key[4];
+    for (int i = 0; i < 4; i++) {
+        thread_base_key[i] = k[i];
+    }
+
+    // === Phase 1: Generate all points in Jacobian coordinates ===
+
+    // First point: P = k * G (heavy operation)
+    uint64_t Px[4], Py[4], Pz[4];
+    _PointMult(k, _Gx, _Gy, Px, Py, Pz);
+
+    for (int i = 0; i < 4; i++) {
+        X_arr[0][i] = Px[i];
+        Y_arr[0][i] = Py[i];
+        Z_arr[0][i] = Pz[i];
+    }
+
+    // Generate subsequent points using P = P + G
+    for (uint32_t key_idx = 1; key_idx < n; key_idx++) {
+        uint64_t tempX[4], tempY[4], tempZ[4];
+        _PointAddMixed(Px, Py, Pz, _Gx, _Gy, tempX, tempY, tempZ);
+
+        for (int i = 0; i < 4; i++) {
+            Px[i] = tempX[i];
+            Py[i] = tempY[i];
+            Pz[i] = tempZ[i];
+            X_arr[key_idx][i] = Px[i];
+            Y_arr[key_idx][i] = Py[i];
+            Z_arr[key_idx][i] = Pz[i];
+        }
+    }
+
+    // === Phase 2: Montgomery's Trick for batch inverse ===
+
+    for (int i = 0; i < 4; i++) {
+        c[0][i] = Z_arr[0][i];
+    }
+    for (uint32_t i = 1; i < n; i++) {
+        _ModMult(c[i-1], Z_arr[i], c[i]);
+    }
+
+    uint64_t u[4];
+    _ModInv(c[n-1], u);
+
+    // === Phase 3: Compute individual inverses and check prefix match ===
+    for (int32_t i = n - 1; i >= 0; i--) {
+        uint64_t Z_inv[4];
+        if (i > 0) {
+            _ModMult(u, c[i-1], Z_inv);
+        } else {
+            for (int j = 0; j < 4; j++) Z_inv[j] = u[j];
+        }
+
+        uint64_t Z_inv_squared[4];
+        _ModSquare(Z_inv, Z_inv_squared);
+
+        uint64_t x[4];
+        _ModMult(X_arr[i], Z_inv_squared, x);
+
+        // Endomorphism: compute β*x and β²*x
+        uint64_t x_beta[4], x_beta2[4];
+        _ModMult(x, _Beta, x_beta);
+        _ModMult(x, _Beta2, x_beta2);
+
+        uint64_t* x_coords[3] = { x, x_beta, x_beta2 };
+
+        // Prefix matching
+        for (uint32_t endo = 0; endo < 3; endo++) {
+            uint64_t x_upper = x_coords[endo][3];
+
+            for (uint32_t p = 0; p < num_prefixes; p++) {
+                if ((x_upper & s_masks[p]) == (s_patterns[p] & s_masks[p])) {
+                    uint32_t slot = atomicAdd(match_count, 1);
+                    if (slot < max_matches) {
+                        matched_base_idx[slot] = idx;
+                        matched_offset[slot] = i;
+                        matched_endo_type[slot] = endo;
+
+                        for (int j = 0; j < 4; j++) {
+                            matched_pubkeys_x[slot * 4 + j] = x_coords[endo][j];
+                        }
+
+                        // Compute actual secret key: thread_base_key + i
+                        // (with carry propagation)
+                        uint64_t actual_key[4];
+                        uint64_t key_sum = thread_base_key[0] + (uint64_t)i;
+                        uint64_t key_carry = (key_sum < thread_base_key[0]) ? 1 : 0;
+                        actual_key[0] = key_sum;
+
+                        for (int j = 1; j < 4; j++) {
+                            key_sum = thread_base_key[j] + key_carry;
+                            key_carry = (key_sum < key_carry) ? 1 : 0;
+                            actual_key[j] = key_sum;
+                        }
+
+                        for (int j = 0; j < 4; j++) {
+                            matched_secret_keys[slot * 4 + j] = actual_key[j];
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Update u for next iteration
+        if (i > 0) {
+            uint64_t temp[4];
+            _ModMult(u, Z_arr[i], temp);
+            for (int j = 0; j < 4; j++) {
+                u[j] = temp[j];
+            }
+        }
+    }
+}
