@@ -3,17 +3,19 @@
 #
 # Usage:
 #   .\scripts\benchmark.ps1
-#   .\scripts\benchmark.ps1 -Seconds 120 -BatchSize 3584000
+#   .\scripts\benchmark.ps1 -Seconds 120 -BatchSize 4000000
 #   .\scripts\benchmark.ps1 -KeysPerThread 2048  # Rebuild and run
+#   .\scripts\benchmark.ps1 -Miners 2  # Test parallel miners
 #
 # When KeysPerThread is changed, it sets the MAX_KEYS_PER_THREAD environment
 # variable and runs cargo build --release before starting the benchmark.
 
 param(
     [int]$Seconds = 120,
-    [int]$BatchSize = 3584000,
+    [int]$BatchSize = 4000000,
     [int]$ThreadsPerBlock = 128,
-    [int]$KeysPerThread = 1500,
+    [int]$KeysPerThread = 1600,
+    [int]$Miners = 1,
     [string]$Prefix = "00000000",
     [switch]$SkipBuild = $false
 )
@@ -27,6 +29,7 @@ Write-Host "Parameters:" -ForegroundColor Yellow
 Write-Host "  BatchSize:        $BatchSize"
 Write-Host "  ThreadsPerBlock:  $ThreadsPerBlock"
 Write-Host "  KeysPerThread:    $KeysPerThread (build-time)"
+Write-Host "  Miners:           $Miners (parallel triple-buffer miners)"
 Write-Host "  Duration:         $Seconds sec"
 Write-Host "  Prefix:           $Prefix"
 Write-Host ""
@@ -61,7 +64,8 @@ $procArgs = @(
     "--prefix", $Prefix,
     "--limit", "0",
     "--batch-size", $BatchSize,
-    "--threads-per-block", $ThreadsPerBlock
+    "--threads-per-block", $ThreadsPerBlock,
+    "--miners", $Miners
 )
 
 $pinfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -108,7 +112,7 @@ if ($lastKeysPerSec) {
 
     # CSV 形式で出力（コピペ用）
     Write-Host ""
-    Write-Host "CSV: $BatchSize,$ThreadsPerBlock,$KeysPerThread,$lastKeysPerSec" -ForegroundColor Yellow
+    Write-Host "CSV: $BatchSize,$ThreadsPerBlock,$KeysPerThread,$Miners,$lastKeysPerSec" -ForegroundColor Yellow
 } else {
     Write-Host "Could not extract keys/sec from output" -ForegroundColor Red
     Write-Host "Output:" -ForegroundColor Yellow
