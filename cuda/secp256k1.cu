@@ -62,6 +62,16 @@ __constant__ uint64_t _Beta2[4] = {
 };
 
 // ============================================================================
+// dG Table for Sequential Key Strategy (precomputed at runtime)
+// ============================================================================
+// dG = MAX_KEYS_PER_THREAD * G
+// Table: [dG, 2*dG, 4*dG, ..., 2^23*dG] (24 entries)
+// Each entry is (X[4], Y[4]) = 8 uint64_t values
+// Total: 24 * 8 = 192 uint64_t = 1536 bytes
+// This is initialized from host via cuMemcpyHtoD to the symbol address
+__constant__ uint64_t _dG_table[192];
+
+// ============================================================================
 // 256-bit Arithmetic Helper Functions (Device Functions)
 // ============================================================================
 
@@ -794,7 +804,6 @@ __device__ void _PointMult(
  */
 __device__ void _PointMultByIndex(
     uint32_t idx,
-    const uint64_t* dG_table,
     const uint64_t base_pubkey_x[4],
     const uint64_t base_pubkey_y[4],
     uint64_t Rx[4], uint64_t Ry[4], uint64_t Rz[4]
@@ -815,11 +824,11 @@ __device__ void _PointMultByIndex(
     // Add dG_table[bit] for each set bit in idx
     for (int bit = 0; bit < 24; bit++) {
         if ((idx >> bit) & 1) {
-            // Load dG_table[bit] (Affine coordinates)
+            // Load _dG_table[bit] from constant memory (Affine coordinates)
             uint64_t dG_x[4], dG_y[4];
             for (int i = 0; i < 4; i++) {
-                dG_x[i] = dG_table[bit * 8 + i];
-                dG_y[i] = dG_table[bit * 8 + 4 + i];
+                dG_x[i] = _dG_table[bit * 8 + i];
+                dG_y[i] = _dG_table[bit * 8 + 4 + i];
             }
 
             // Add: R = R + dG_table[bit]
@@ -1283,7 +1292,7 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
     const uint64_t* base_key,       // Single base key [4 limbs]
     const uint64_t* base_pubkey_x,  // base_key * G, X coordinate [4 limbs]
     const uint64_t* base_pubkey_y,  // base_key * G, Y coordinate [4 limbs]
-    const uint64_t* dG_table,       // Precomputed table [24 entries * 8 limbs = 192 limbs]
+    // dG_table is now in constant memory (_dG_table)
     const uint64_t* patterns,
     const uint64_t* masks,
     uint32_t num_prefixes,
@@ -1345,7 +1354,7 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
     // Instead of _PointMult(k, G) with 256 double-and-add operations,
     // we use precomputed dG table and perform at most 24 point additions.
     uint64_t Px[4], Py[4], Pz[4];
-    _PointMultByIndex(idx, dG_table, base_pubkey_x, base_pubkey_y, Px, Py, Pz);
+    _PointMultByIndex(idx, base_pubkey_x, base_pubkey_y, Px, Py, Pz);
 
     for (int i = 0; i < 4; i++) {
         X_arr[0][i] = Px[i];

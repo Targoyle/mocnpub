@@ -531,7 +531,9 @@ pub struct SequentialTripleBufferMiner {
     kernel: CudaFunction,
     patterns_dev: cudarc::driver::CudaSlice<u64>,
     masks_dev: cudarc::driver::CudaSlice<u64>,
-    dg_table_dev: cudarc::driver::CudaSlice<u64>, // Precomputed dG table (24 * 8 = 192 u64)
+    // dG table is now in constant memory (_dG_table in CUDA)
+    // We keep the slice here to prevent it from being dropped (which would call cuMemFree)
+    _dg_table_const: cudarc::driver::CudaSlice<u8>,
     num_prefixes: usize,
     max_matches: u32,
     threads_per_block: u32,
@@ -572,11 +574,17 @@ impl SequentialTripleBufferMiner {
             stream_0.memcpy_htod(&masks, &mut masks_dev)?;
         }
 
-        // Compute and upload dG table (precomputed: dG, 2*dG, 4*dG, ..., 2^23*dG)
+        // Compute and upload dG table to constant memory
         // This eliminates _PointMult(k, G) from the kernel!
         let dg_table = compute_dg_table();
-        let mut dg_table_dev = stream_0.alloc_zeros::<u64>(DG_TABLE_ENTRIES * 8)?;
-        stream_0.memcpy_htod(&dg_table, &mut dg_table_dev)?;
+
+        // Get constant memory symbol address using get_global()
+        // IMPORTANT: We must keep this slice alive to prevent cuMemFree being called on drop!
+        let mut dg_table_const = module.get_global("_dG_table", &stream_0)?;
+
+        // Convert u64 data to bytes and copy to constant memory
+        let dg_table_bytes: Vec<u8> = dg_table.iter().flat_map(|x| x.to_ne_bytes()).collect();
+        stream_0.memcpy_htod(&dg_table_bytes, &mut dg_table_const)?;
 
         // Pre-allocate buffers for all 3 streams
         // Note: base_key_dev is only 4 u64 (32 bytes) instead of batch_size * 4!
@@ -608,7 +616,7 @@ impl SequentialTripleBufferMiner {
             kernel,
             patterns_dev,
             masks_dev,
-            dg_table_dev,
+            _dg_table_const: dg_table_const,
             num_prefixes,
             max_matches,
             threads_per_block,
@@ -661,7 +669,7 @@ impl SequentialTripleBufferMiner {
         builder.arg(&mut buf.base_key_dev);
         builder.arg(&mut buf.base_pubkey_x_dev);
         builder.arg(&mut buf.base_pubkey_y_dev);
-        builder.arg(&mut self.dg_table_dev);
+        // dG_table is in constant memory (_dG_table), no argument needed
         builder.arg(&mut self.patterns_dev);
         builder.arg(&mut self.masks_dev);
         builder.arg(&num_prefixes_u32);
@@ -910,7 +918,7 @@ pub fn generate_pubkeys_sequential(
     let mut base_key_dev = stream.alloc_zeros::<u64>(4)?;
     let mut base_pubkey_x_dev = stream.alloc_zeros::<u64>(4)?;
     let mut base_pubkey_y_dev = stream.alloc_zeros::<u64>(4)?;
-    let mut dg_table_dev = stream.alloc_zeros::<u64>(DG_TABLE_ENTRIES * 8)?;
+    // dG table is in constant memory (_dG_table)
     let mut patterns_dev = stream.alloc_zeros::<u64>(num_prefixes)?;
     let mut masks_dev = stream.alloc_zeros::<u64>(num_prefixes)?;
 
@@ -926,11 +934,15 @@ pub fn generate_pubkeys_sequential(
     let dg_table = compute_dg_table();
     let (base_pubkey_x, base_pubkey_y) = compute_base_pubkey(base_key);
 
+    // Upload dG table to constant memory
+    let mut dg_table_const = module.get_global("_dG_table", &stream)?;
+    let dg_table_bytes: Vec<u8> = dg_table.iter().flat_map(|x| x.to_ne_bytes()).collect();
+    stream.memcpy_htod(&dg_table_bytes, &mut dg_table_const)?;
+
     // Copy inputs to device
     stream.memcpy_htod(base_key.as_slice(), &mut base_key_dev)?;
     stream.memcpy_htod(&base_pubkey_x, &mut base_pubkey_x_dev)?;
     stream.memcpy_htod(&base_pubkey_y, &mut base_pubkey_y_dev)?;
-    stream.memcpy_htod(&dg_table, &mut dg_table_dev)?;
     stream.memcpy_htod(&patterns, &mut patterns_dev)?;
     stream.memcpy_htod(&masks, &mut masks_dev)?;
 
@@ -950,7 +962,7 @@ pub fn generate_pubkeys_sequential(
     builder.arg(&mut base_key_dev);
     builder.arg(&mut base_pubkey_x_dev);
     builder.arg(&mut base_pubkey_y_dev);
-    builder.arg(&mut dg_table_dev);
+    // dG_table is in constant memory (_dG_table), no argument needed
     builder.arg(&mut patterns_dev);
     builder.arg(&mut masks_dev);
     builder.arg(&num_prefixes_u32);
