@@ -552,10 +552,13 @@ impl SequentialTripleBufferMiner {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let num_prefixes = prefix_bits.len();
 
-        // Create three streams using fork
-        let stream_0 = ctx.default_stream();
-        let stream_1 = stream_0.fork()?;
-        let stream_2 = stream_1.fork()?;
+        // Create three streams using fork - ALL non-default!
+        // Default stream implicitly synchronizes with other streams,
+        // which prevents true parallel execution across multiple miners.
+        let base_stream = ctx.default_stream();
+        let stream_0 = base_stream.fork()?;
+        let stream_1 = base_stream.fork()?;
+        let stream_2 = base_stream.fork()?;
         let streams = vec![stream_0.clone(), stream_1, stream_2];
 
         // Load PTX module
