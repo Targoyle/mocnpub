@@ -2,7 +2,7 @@
 
 **作成日**: 2025-11-14
 **最終更新**: 2025-12-18
-**進捗**: Step 0〜9 完了！🎉 Blocking Sync で **CPU 使用率 100% → 1%** 削減（電力消費大幅削減）！🔥
+**進捗**: Step 0〜10 完了！🎉 32-bit Prefix Matching で **複数 prefix 時 +1.2%** 高速化！🔥
 
 ---
 
@@ -21,6 +21,7 @@
 | Step 7 | Triple Buffering + Sequential Key Strategy（3.67B、VRAM 99.99%削減）| ✅ 完了 🔥 |
 | Step 8 | dG テーブルプリコンピュート（_PointMult 削減、+12.7%）| ✅ 完了 🔥🔥🔥 |
 | Step 9 | Blocking Sync（CPU 使用率 100% → 1%、電力消費削減）| ✅ 完了 🔥🔥🔥 |
+| Step 10 | 32-bit Prefix Matching（複数 prefix 時 +1.2%）| ✅ 完了 🔥 |
 
 ---
 
@@ -489,6 +490,50 @@ unsafe {
 - cudarc 0.18.2 では `cuDevicePrimaryCtxSetFlags_v2` が sys レイヤーで公開されている
 - Safe API ラッパー（`primary_ctx::set_flags()`）は存在しない
 - `CudaContext::new()` の **前** に `result::init()` と flags 設定が必要
+
+---
+
+## ✅ Step 10: 32-bit Prefix Matching（2025-12-18 完了）🔥
+
+### 背景
+
+- ncu プロファイリングで prefix matching ループが **17%** の Warp Stall を占めていた
+- 64-bit 比較を 32-bit に変更して高速化を狙う
+- 1 prefix のときに速度低下がないことを維持（State of the Art）
+
+### 実装内容
+
+**Phase 1: 32-bit 化 + 1 prefix 特殊化**
+
+- GPU の patterns/masks を `uint64_t` → `uint32_t` に変更
+- 共有メモリ使用量: 1024 bytes → 512 bytes（半減）
+- 1 prefix 時はループをスキップ（最速パス維持）
+- CPU 側で 64-bit 再検証（false positive フィルタリング）
+
+**Phase 2: 32-bit × 2 連結**
+
+- 2 つの 32-bit pattern を 64-bit に連結して同時チェック
+- ループ回数が半減（32 prefix → 16 iterations）
+- XOR + mask で効率的に 2 prefix を同時判定
+
+### 結果 🎉
+
+| ケース | 64-bit 比較 | 32-bit 最適化 | 変化 |
+|--------|-------------|---------------|------|
+| **1 prefix** | 4.135B | **4.131B** | 変化なし ✅ |
+| **32 prefix** | 3.793B | **3.839B** | **+1.21%** 🔥 |
+
+### 学び 💡
+
+- 32-bit 比較は 64-bit より高速（特に複数 prefix 時）
+- 1 prefix 特殊化で最速パスを維持できる
+- 32-bit × 2 連結でループ回数を半減できる
+- CPU 再検証のオーバーヘッドは無視できる（false positive は超レア）
+
+### 今後の可能性
+
+- **並列リダクション**：match の有無だけ先にチェック → match したときだけ詳細処理
+- さらに数 % の改善が期待できる（Step 11 候補）
 
 ---
 
