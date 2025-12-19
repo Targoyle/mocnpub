@@ -12,11 +12,12 @@
 
 // Prime p = 2^256 - 2^32 - 977
 // 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-// Note: P1, P2, P3 are all 0xFFFFFFFFFFFFFFFF (max uint64_t)
-#define P0 0xFFFFFFFEFFFFFC2FULL
-#define P1 0xFFFFFFFFFFFFFFFFULL
-#define P2 0xFFFFFFFFFFFFFFFFULL
-#define P3 0xFFFFFFFFFFFFFFFFULL
+__constant__ uint64_t _P[4] = {
+    0xFFFFFFFEFFFFFC2FULL,
+    0xFFFFFFFFFFFFFFFFULL,
+    0xFFFFFFFFFFFFFFFFULL,
+    0xFFFFFFFFFFFFFFFFULL
+};
 
 // Generator point G (x coordinate)
 // 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
@@ -156,11 +157,9 @@ __device__ void _ModAdd(const uint64_t a[4], const uint64_t b[4], uint64_t resul
     _Add256(a, b, sum, &carry);
 
     // Always compute diff = sum - p (may underflow)
-    // Using #define constants for P
-    uint64_t p[4] = {P0, P1, P2, P3};
     uint64_t diff[4];
     uint64_t borrow;
-    _Sub256(sum, p, diff, &borrow);
+    _Sub256(sum, _P, diff, &borrow);
 
     // Use diff if: carry || !borrow (i.e., sum >= p or overflow)
     // use_diff = carry | (1 - borrow)
@@ -188,12 +187,11 @@ __device__ void _ModSub(const uint64_t a[4], const uint64_t b[4], uint64_t resul
     // mask = borrow ? 0xFFFFFFFFFFFFFFFF : 0
     uint64_t mask = -borrow;
 
-    // diff + (p & mask) - unrolled with #define constants
+    // diff + (p & mask)
     uint64_t p_masked[4];
-    p_masked[0] = P0 & mask;
-    p_masked[1] = P1 & mask;
-    p_masked[2] = P2 & mask;
-    p_masked[3] = P3 & mask;
+    for (int i = 0; i < 4; i++) {
+        p_masked[i] = _P[i] & mask;
+    }
 
     uint64_t carry;
     _Add256(diff, p_masked, result, &carry);
@@ -342,60 +340,30 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
 
     // Now reduce: while temp >= p, subtract p
     // At most 2-3 iterations needed
-    // Using #define constants for P (P1=P2=P3=0xFFFFFFFFFFFFFFFF)
     for (int iter = 0; iter < 3; iter++) {
         // Check if temp >= p
-        // Since P1=P2=P3=max_uint64, comparison is simplified
         bool ge = false;
         if (temp[4] > 0) {
             ge = true;
-        } else if (temp[3] < P3) {
-            ge = false;
-        } else if (temp[2] < P2) {
-            ge = false;
-        } else if (temp[1] < P1) {
-            ge = false;
         } else {
-            // temp[3]=temp[2]=temp[1]=0xFFFFFFFFFFFFFFFF, check temp[0] vs P0
-            ge = temp[0] >= P0;
+            // Compare temp[0..3] with p
+            ge = _Compare256(temp, _P) >= 0;
         }
 
         if (ge) {
-            // Subtract p from temp (320-bit - 256-bit) - unrolled
+            // Subtract p from temp (320-bit - 256-bit)
             uint64_t borrow = 0;
+            for (int i = 0; i < 4; i++) {
+                // Two-stage subtraction to avoid overflow in borrow detection
+                uint64_t temp_diff = temp[i] - _P[i];
+                uint64_t borrow1 = (temp[i] < _P[i]) ? 1 : 0;
 
-            // i = 0
-            uint64_t temp_diff0 = temp[0] - P0;
-            uint64_t borrow1_0 = (temp[0] < P0) ? 1 : 0;
-            uint64_t final_diff0 = temp_diff0 - borrow;
-            uint64_t borrow2_0 = (temp_diff0 < borrow) ? 1 : 0;
-            temp[0] = final_diff0;
-            borrow = borrow1_0 | borrow2_0;
+                uint64_t final_diff = temp_diff - borrow;
+                uint64_t borrow2 = (temp_diff < borrow) ? 1 : 0;
 
-            // i = 1
-            uint64_t temp_diff1 = temp[1] - P1;
-            uint64_t borrow1_1 = (temp[1] < P1) ? 1 : 0;
-            uint64_t final_diff1 = temp_diff1 - borrow;
-            uint64_t borrow2_1 = (temp_diff1 < borrow) ? 1 : 0;
-            temp[1] = final_diff1;
-            borrow = borrow1_1 | borrow2_1;
-
-            // i = 2
-            uint64_t temp_diff2 = temp[2] - P2;
-            uint64_t borrow1_2 = (temp[2] < P2) ? 1 : 0;
-            uint64_t final_diff2 = temp_diff2 - borrow;
-            uint64_t borrow2_2 = (temp_diff2 < borrow) ? 1 : 0;
-            temp[2] = final_diff2;
-            borrow = borrow1_2 | borrow2_2;
-
-            // i = 3
-            uint64_t temp_diff3 = temp[3] - P3;
-            uint64_t borrow1_3 = (temp[3] < P3) ? 1 : 0;
-            uint64_t final_diff3 = temp_diff3 - borrow;
-            uint64_t borrow2_3 = (temp_diff3 < borrow) ? 1 : 0;
-            temp[3] = final_diff3;
-            borrow = borrow1_3 | borrow2_3;
-
+                temp[i] = final_diff;
+                borrow = borrow1 | borrow2;
+            }
             // Subtract borrow from temp[4]
             temp[4] -= borrow;
         } else {
