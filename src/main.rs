@@ -233,6 +233,7 @@ fn mining_loop(
 
     // Parameter settings
     let max_matches: u32 = 1000; // generous buffer
+    // * 3 for endomorphism: each key generates 3 X-coordinates (P, β*P, β²*P)
     let batch_keys = (batch_size as u64) * (keys_per_thread as u64) * 3;
 
     // Create and launch parallel miners
@@ -262,13 +263,14 @@ fn mining_loop(
             };
 
             let mut rng = rand::thread_rng();
-            let mut host_bytes: [[u8; 32]; 3] = [[0u8; 32]; 3];
             let mut host_u64: [[u64; 4]; 3] = [[0u64; 4]; 3];
 
             // Launch initial batches
+            #[allow(clippy::needless_range_loop)]
             for buf_idx in 0..3 {
-                rng.fill_bytes(&mut host_bytes[buf_idx]);
-                host_u64[buf_idx] = bytes_to_u64x4(&host_bytes[buf_idx]);
+                let mut key_bytes = [0u8; 32];
+                rng.fill_bytes(&mut key_bytes);
+                host_u64[buf_idx] = bytes_to_u64x4(&key_bytes);
                 if let Err(e) = miner.launch_single(buf_idx, &host_u64[buf_idx]) {
                     eprintln!("❌ Miner {} launch error: {}", miner_id, e);
                     return;
@@ -306,8 +308,9 @@ fn mining_loop(
                 }
 
                 // Generate new key and launch
-                rng.fill_bytes(&mut host_bytes[collect_idx]);
-                host_u64[collect_idx] = bytes_to_u64x4(&host_bytes[collect_idx]);
+                let mut key_bytes = [0u8; 32];
+                rng.fill_bytes(&mut key_bytes);
+                host_u64[collect_idx] = bytes_to_u64x4(&key_bytes);
                 if let Err(e) = miner.launch_single(collect_idx, &host_u64[collect_idx]) {
                     eprintln!("❌ Miner {} launch error: {}", miner_id, e);
                     break;
@@ -352,6 +355,7 @@ fn mining_loop(
                 let secp = Secp256k1::new();
                 let pk = sk.public_key(&secp);
                 let pk_hex = pk.to_string();
+                // Skip first 2 chars ("02" or "03" prefix) to get X-coordinate only
                 let pk_x_only = &pk_hex[2..];
 
                 let npub = pubkey_to_npub(&pk);
@@ -489,7 +493,7 @@ fn run_verify(iterations: u64, batch_size: usize, miners_opt: Option<usize>) -> 
         }
     );
 
-    // Initialize GPU
+    // Initialize GPU (init_gpu already returns Arc<CudaContext>)
     let ctx = match init_gpu() {
         Ok(ctx) => ctx,
         Err(e) => {
@@ -497,7 +501,6 @@ fn run_verify(iterations: u64, batch_size: usize, miners_opt: Option<usize>) -> 
             std::process::exit(1);
         }
     };
-    let ctx = Arc::new(ctx);
     println!("✅ GPU initialized successfully!");
 
     let keys_per_thread = get_max_keys_per_thread();
