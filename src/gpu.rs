@@ -214,7 +214,7 @@ pub fn test_mod_add_gpu(
 /// Test modular multiplication on GPU
 ///
 /// This function tests the _ModMult function by multiplying two 256-bit numbers modulo p
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
 pub fn test_mod_mult_gpu(
     ctx: &Arc<CudaContext>,
     a: &[u64; 4],
@@ -270,7 +270,7 @@ pub fn test_mod_mult_gpu(
 /// Test modular inverse on GPU
 ///
 /// This function tests the _ModInv function by computing a^(-1) mod p
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
 pub fn test_mod_inv_gpu(
     ctx: &Arc<CudaContext>,
     a: &[u64; 4],
