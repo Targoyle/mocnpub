@@ -415,8 +415,8 @@ fn sub_u64x4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
 /// - Ok(()) : prefix is valid
 /// - Err(String) : error message
 pub fn validate_prefix(prefix: &str) -> Result<(), String> {
-    // Valid bech32 character set (32 characters)
-    const VALID_CHARS: &str = "023456789acdefghjklmnpqrstuvwxyz";
+    // Use BECH32_CHARSET for validation (same 32 characters, different order)
+    // BECH32_CHARSET order matters for encoding, but not for contains() check
 
     // Empty string check
     if prefix.is_empty() {
@@ -435,7 +435,7 @@ pub fn validate_prefix(prefix: &str) -> Result<(), String> {
         }
 
         // Check for invalid bech32 characters
-        if !VALID_CHARS.contains(ch) {
+        if !BECH32_CHARSET.contains(ch) {
             // Add detailed explanation for commonly confused characters
             let hint = match ch {
                 '1' => "Character '1' is not allowed (reserved as separator in bech32)",
@@ -449,7 +449,7 @@ pub fn validate_prefix(prefix: &str) -> Result<(), String> {
                 "Invalid prefix '{}': bech32 does not allow '{}'\n\
                  {}\n\
                  Valid characters: {}",
-                prefix, ch, hint, VALID_CHARS
+                prefix, ch, hint, BECH32_CHARSET
             ));
         }
     }
