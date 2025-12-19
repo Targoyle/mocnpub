@@ -557,6 +557,7 @@ Warp 3:       [PointAdd...]
 | `generate_pubkeys` | 2025-12-09 |
 | `generate_pubkeys_sequential` | 2025-12-09 |
 | `generate_pubkeys_sequential_montgomery` | 2025-12-09 |
+| `generate_pubkeys_with_prefix_match` | 2025-12-19 |
 
 ### 削除済み（Rust 関数）
 
@@ -565,13 +566,14 @@ Warp 3:       [PointAdd...]
 | `wide_mul_u128` | 2025-12-09 |
 | `u64x4_to_bytes_for_scalar` | 2025-12-09 |
 | `generate_pubkeys_batch` | 2025-12-09 |
+| `generate_pubkeys_with_prefix_match` | 2025-12-19 |
 
 ### 現在の構成
 
-- **本番カーネル**：`_BatchGeneratePublicKeysWithPrefixMatch` のみ
-- **Rust 関数**：`generate_pubkeys_with_prefix_match` のみ
+- **本番カーネル**：`generate_pubkeys_sequential` のみ
+- **Rust 関数**：`generate_pubkeys_sequential` のみ
 - **テストコード**：本番カーネル用のテストのみ（36 テスト）
-- **削減行数**：約 930 行（CUDA 721 行 + Rust 213 行）
+- **削減行数**：約 1,300 行（CUDA 897 行 + Rust 407 行）
 
 ---
 
