@@ -443,27 +443,19 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
         _Mult64(high[i], 977, &low, &high_part);
 
         // Add carry from previous iteration
-        uint64_t sum = low + carry;
-        uint64_t new_carry = (sum < low) ? 1 : 0;
+        uint64_t sum;
+        uint32_t new_carry = _Add64(low, carry, &sum);
 
         mult977[i] = sum;
         carry = high_part + new_carry;
     }
     mult977[4] = carry;
 
-    // Add: shifted + mult977
-    uint64_t sum[5] = {0};
-    carry = 0;
-    for (int i = 0; i < 5; i++) {
-        // Two-stage addition to properly detect carry
-        uint64_t s1 = shifted[i] + mult977[i];
-        uint64_t carry1 = (s1 < shifted[i]) ? 1 : 0;
-
-        uint64_t s2 = s1 + carry;
-        uint64_t carry2 = (s2 < s1) ? 1 : 0;
-
-        sum[i] = s2;
-        carry = carry1 | carry2;
+    // Add: shifted + mult977 (using PTX carry chain)
+    uint64_t sum[5];
+    uint32_t c = _Add64(shifted[0], mult977[0], &sum[0]);
+    for (int i = 1; i < 5; i++) {
+        c = _Addc64(shifted[i], mult977[i], c, &sum[i]);
     }
 
     // Reduce sum[4]: sum[4] * 2^256 mod p = sum[4] * (2^32 + 977)
@@ -477,17 +469,10 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
     temp[3] = low[3];
     temp[4] = 0;
 
-    carry = 0;
-    for (int i = 0; i < 5; i++) {
-        // Two-stage addition to properly detect carry
-        uint64_t s1 = temp[i] + sum[i];
-        uint64_t carry1 = (s1 < temp[i]) ? 1 : 0;
-
-        uint64_t s2 = s1 + carry;
-        uint64_t carry2 = (s2 < s1) ? 1 : 0;
-
-        temp[i] = s2;
-        carry = carry1 | carry2;
+    // Add: temp + sum (using PTX carry chain)
+    c = _Add64(temp[0], sum[0], &temp[0]);
+    for (int i = 1; i < 5; i++) {
+        c = _Addc64(temp[i], sum[i], c, &temp[i]);
     }
 
     // Now reduce: while temp >= p, subtract p
