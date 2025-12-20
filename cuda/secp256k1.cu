@@ -347,6 +347,8 @@ __device__ void _Mult64(uint64_t a, uint64_t b, uint64_t* low, uint64_t* high)
 /**
  * Reduce the 5th limb of a 320-bit number: sum[4] * 2^256 mod p = sum[4] * (2^32 + 977)
  * Adds the result back to sum[0..4], avoiding billions of iterations in a naive reduction loop.
+ *
+ * Uses PTX carry chain for efficient carry propagation.
  */
 __device__ void _ReduceOverflow(uint64_t sum[5])
 {
@@ -362,49 +364,20 @@ __device__ void _ReduceOverflow(uint64_t sum[5])
     uint64_t mult_low, mult_high;
     _Mult64(factor, 977, &mult_low, &mult_high);
 
-    // Add (shifted_low + mult_low) to sum[0], (shifted_high + mult_high) to sum[1]
-    // This implements: factor * (2^32 + 977) = (shifted_low + mult_low) + ((shifted_high + mult_high) << 64)
-    uint64_t carry = 0;
+    // Compute (shifted + mult) = factor * (2^32 + 977)
+    // Result is at most 97-bit (64-bit factor * 33-bit constant)
+    uint64_t add0, add1;
+    uint32_t c = _Add64(shifted_low, mult_low, &add0);
+    c = _Addc64(shifted_high, mult_high, c, &add1);
+    // c is carry from add1 (0 or 1, represents bit 128)
 
-    // Add shifted_low + mult_low to sum[0]
-    uint64_t add0 = shifted_low + mult_low;
-    uint64_t carry0 = (add0 < shifted_low) ? 1 : 0;
+    // Add (add0, add1, c, 0) to sum[0..3]
+    uint32_t c2 = _Add64(sum[0], add0, &sum[0]);
+    c2 = _Addc64(sum[1], add1, c2, &sum[1]);
+    c2 = _Addc64(sum[2], c, c2, &sum[2]);
+    c2 = _Addc64(sum[3], 0, c2, &sum[3]);
 
-    uint64_t s0 = sum[0] + add0;
-    carry = (s0 < sum[0]) ? 1 : 0;
-    carry += carry0;
-    sum[0] = s0;
-
-    // Add shifted_high + mult_high + carry to sum[1]
-    // Using 2-stage addition to properly detect carry
-    uint64_t add1 = shifted_high + mult_high;
-    uint64_t carry1 = (add1 < shifted_high) ? 1 : 0;
-
-    // Stage 1: sum[1] + add1
-    uint64_t s1a = sum[1] + add1;
-    uint64_t carry_a = (s1a < sum[1]) ? 1 : 0;
-
-    // Stage 2: s1a + carry
-    uint64_t s1 = s1a + carry;
-    uint64_t carry_b = (s1 < s1a) ? 1 : 0;
-
-    // Total carry: carry1 (from add1) + carry_a (from stage1) + carry_b (from stage2)
-    // Note: This can be 0, 1, 2, or 3, which is fine for propagation
-    carry = carry1 + carry_a + carry_b;
-    sum[1] = s1;
-
-    // Propagate carry to sum[2]
-    uint64_t s2 = sum[2] + carry;
-    carry = (s2 < sum[2]) ? 1 : 0;
-    sum[2] = s2;
-
-    // Propagate carry to sum[3]
-    uint64_t s3 = sum[3] + carry;
-    carry = (s3 < sum[3]) ? 1 : 0;
-    sum[3] = s3;
-
-    // Set sum[4] to carry (should be 0 or very small)
-    sum[4] = carry;
+    sum[4] = c2;
 }
 
 /**
