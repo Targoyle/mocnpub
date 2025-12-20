@@ -2,7 +2,7 @@
 
 **作成日**: 2025-11-14
 **最終更新**: 2025-12-20
-**進捗**: Step 0〜12 完了！🎉 max prefix 256 対応で大量 prefix 指定が可能に！🔥
+**進捗**: Step 0〜13 完了！🎉 Addition Chain で 4.2B keys/sec 達成！🔥
 
 ---
 
@@ -24,6 +24,7 @@
 | Step 10 | 32-bit Prefix Matching（複数 prefix 時 +1.2%）| ✅ 完了 🔥 |
 | Step 11 | Constant Memory（patterns/masks、複数 prefix 時 +3.0%）| ✅ 完了 🔥 |
 | Step 12 | Max Prefix 256（64 → 256 に拡張、速度影響なし）| ✅ 完了 🔥 |
+| Step 13 | Addition Chain（_ModInv 乗算 128→14、+1.4%）| ✅ 完了 🔥🔥🔥 |
 
 ---
 
@@ -53,11 +54,12 @@
 | GPU + Sequential Key Strategy（VRAM 99.99%削減、1600 keys/thread） | 3.67B keys/sec | 52,429x |
 | GPU + dG テーブルプリコンピュート（_PointMult 削減） | 4.135B keys/sec | 59,071x |
 | GPU + Blocking Sync（CPU 使用率 1%） | 4.136B keys/sec | 59,086x |
-| **GPU + Constant Memory（patterns/masks）** | **4.141B keys/sec** | **59,157x** 🔥🔥🔥 |
+| GPU + Constant Memory（patterns/masks） | 4.141B keys/sec | 59,157x |
+| **GPU + Addition Chain（_ModInv 乗算 128→14）** | **4.199B keys/sec** | **59,991x** 🔥🔥🔥 |
 
-**8文字 prefix が約 4.5 分で見つかる！** 🎉
+**8文字 prefix が約 4.4 分で見つかる！** 🎉
 **CPU 使用率が 100% → 1% に削減！電力消費大幅削減！** 💡
-**32 prefix 時：3.954B keys/sec（+3.0% 高速化）** 💪
+**32 prefix 時：4.011B keys/sec（大台突破！）** 💪
 
 ---
 
@@ -614,6 +616,60 @@ unsafe {
 - **速度への悪影響なし**：constant memory を 4 倍に拡張しても、キャッシュ効率は維持
 - **64 prefix → 256 prefix**：より多くの prefix を同時に探せるようになった
 - **constant memory は余裕がある**：64 KB 中 2 KB しか使っていない
+
+---
+
+## ✅ Step 13: Addition Chain（2025-12-20 完了）🔥🔥🔥
+
+### 背景
+
+- `_ModInv` は Fermat の小定理で `a^(p-2) mod p` を計算
+- 従来の二乗-乗算法：256 回の二乗 + ~128 回の乗算
+- 乗算が warp stall のボトルネックになっていた
+
+### Addition Chain とは
+
+**メモ化による累乗計算の最適化**！
+
+- 中間結果（x2, x3, x6, x9, x11, x22, x44, x88, x176, x220, x223）をキャッシュ
+- 後から再利用して乗算回数を削減
+- p-2 の特殊な構造を活用：ブロック長 {1, 2, 22, 223}
+
+### 実装内容
+
+**RustCrypto k256 / Peter Dettman の Addition Chain を参考に実装**：
+
+```
+x2 = a^3, x3 = a^7, x6 = a^63, x9 = a^511, x11 = a^2047
+x22 = a^(2^22-1), x44 = a^(2^44-1), x88 = a^(2^88-1)
+x176 = a^(2^176-1), x220 = a^(2^220-1), x223 = a^(2^223-1)
+```
+
+最終組み立て：`x223 * 2^23 + x22 * 2^5 + a * 2^3 + x2 * 2^2 + a`
+
+### 結果 🎉
+
+| 指標 | Before | After | 変化 |
+|------|--------|-------|------|
+| **乗算回数** | ~128 | **14** | **-114 回！** |
+| **二乗回数** | 256 | 255 | -1 |
+| **1 prefix** | 4.141B | **4.199B** | **+1.4%** 🔥 |
+| **32 prefix** | 3.954B | **4.011B** | **+1.4%** 🔥 |
+
+### ptxas 比較（sm_89）
+
+| 指標 | Before | After | 差分 |
+|------|--------|-------|------|
+| スタック | 144,032 | 144,096 | +64 bytes |
+| スピル | 0 | 24 bytes | +24 bytes |
+| レジスタ | 96 | 96 | 同じ |
+
+### 学び 💡
+
+- **アルゴリズムの改善は上がり幅が大きい**：乗算 114 回削減の効果がスピル増加を上回った
+- **Addition Chain は数学的概念**：ライセンス制約なし、自由に実装可能
+- **中間変数のメモ化は有効**：GPU でもレジスタ圧が許容範囲なら効果大
+- **32 prefix でも 4B 突破！**：大台に乗った 🎉
 
 ---
 
