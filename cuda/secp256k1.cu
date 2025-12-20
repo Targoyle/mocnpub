@@ -17,6 +17,7 @@
 #define P1 0xFFFFFFFFFFFFFFFFULL
 #define P2 0xFFFFFFFFFFFFFFFFULL
 #define P3 0xFFFFFFFFFFFFFFFFULL
+#define P123 0xFFFFFFFFFFFFFFFFULL  // P1 = P2 = P3 (max uint64, special form)
 
 // Generator point G (x coordinate)
 // 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
@@ -234,13 +235,21 @@ __device__ void _ReduceOverflow(uint64_t sum[5])
     sum[0] = s0;
 
     // Add shifted_high + mult_high + carry to sum[1]
+    // Using 2-stage addition to properly detect carry
     uint64_t add1 = shifted_high + mult_high;
     uint64_t carry1 = (add1 < shifted_high) ? 1 : 0;
 
-    uint64_t s1 = sum[1] + add1 + carry;
-    uint64_t new_carry = (s1 < sum[1]) ? 1 : 0;
-    if (add1 + carry < add1) new_carry = 1;
-    carry = new_carry + carry1;
+    // Stage 1: sum[1] + add1
+    uint64_t s1a = sum[1] + add1;
+    uint64_t carry_a = (s1a < sum[1]) ? 1 : 0;
+
+    // Stage 2: s1a + carry
+    uint64_t s1 = s1a + carry;
+    uint64_t carry_b = (s1 < s1a) ? 1 : 0;
+
+    // Total carry: carry1 (from add1) + carry_a (from stage1) + carry_b (from stage2)
+    // Note: This can be 0, 1, 2, or 3, which is fine for propagation
+    carry = carry1 + carry_a + carry_b;
     sum[1] = s1;
 
     // Propagate carry to sum[2]
@@ -342,23 +351,23 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
 
     // Now reduce: while temp >= p, subtract p
     // At most 2-3 iterations needed
-    // Using #define constants for P (P1=P2=P3=0xFFFFFFFFFFFFFFFF)
+    // Using #define constants for P (P1=P2=P3=P123=max_uint64)
     for (int iter = 0; iter < 3; iter++) {
         // Check if temp >= p
-        // Since P1=P2=P3=max_uint64, comparison is simplified:
+        // Since P1=P2=P3=P123=max_uint64, comparison is simplified:
         // - If any of temp[3,2,1] < max_uint64, then temp < p
         // - Otherwise check temp[0] >= P0
         bool ge = false;
         if (temp[4] > 0) {
             ge = true;
-        } else if (temp[3] < P3) {
+        } else if (temp[3] < P123) {
             ge = false;
-        } else if (temp[2] < P2) {
+        } else if (temp[2] < P123) {
             ge = false;
-        } else if (temp[1] < P1) {
+        } else if (temp[1] < P123) {
             ge = false;
         } else {
-            // temp[3]=temp[2]=temp[1]=0xFFFFFFFFFFFFFFFF, check temp[0] vs P0
+            // temp[3]=temp[2]=temp[1]=P123 (max_uint64), check temp[0] vs P0
             ge = temp[0] >= P0;
         }
 
@@ -374,25 +383,27 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
             temp[0] = final_diff0;
             borrow = borrow1_0 | borrow2_0;
 
-            // i = 1
-            uint64_t temp_diff1 = temp[1] - P1;
-            uint64_t borrow1_1 = (temp[1] < P1) ? 1 : 0;
+            // i = 1, 2, 3: P1 = P2 = P3 = P123 (max_uint64)
+            // temp[i] - P123 always underflows unless temp[i] == P123
+            // So borrow1 = (temp[i] < P123) ? 1 : 0 = (temp[i] != P123) ? 1 : 0
+            uint64_t temp_diff1 = temp[1] - P123;
+            uint64_t borrow1_1 = (temp[1] < P123) ? 1 : 0;
             uint64_t final_diff1 = temp_diff1 - borrow;
             uint64_t borrow2_1 = (temp_diff1 < borrow) ? 1 : 0;
             temp[1] = final_diff1;
             borrow = borrow1_1 | borrow2_1;
 
             // i = 2
-            uint64_t temp_diff2 = temp[2] - P2;
-            uint64_t borrow1_2 = (temp[2] < P2) ? 1 : 0;
+            uint64_t temp_diff2 = temp[2] - P123;
+            uint64_t borrow1_2 = (temp[2] < P123) ? 1 : 0;
             uint64_t final_diff2 = temp_diff2 - borrow;
             uint64_t borrow2_2 = (temp_diff2 < borrow) ? 1 : 0;
             temp[2] = final_diff2;
             borrow = borrow1_2 | borrow2_2;
 
             // i = 3
-            uint64_t temp_diff3 = temp[3] - P3;
-            uint64_t borrow1_3 = (temp[3] < P3) ? 1 : 0;
+            uint64_t temp_diff3 = temp[3] - P123;
+            uint64_t borrow1_3 = (temp[3] < P123) ? 1 : 0;
             uint64_t final_diff3 = temp_diff3 - borrow;
             uint64_t borrow2_3 = (temp_diff3 < borrow) ? 1 : 0;
             temp[3] = final_diff3;
@@ -709,7 +720,7 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
  *   Y3 = M * (S - X3) - 8 * Y1^4
  *   Z3 = 2 * Y1 * Z1
  *
- * Cost: 8M + 3S (8 multiplications, 3 squarings)
+ * Cost: 3M + 4S (3 multiplications, 4 squarings)
  */
 __device__ void _PointDouble(
     const uint64_t X1[4], const uint64_t Y1[4], const uint64_t Z1[4],
