@@ -2,7 +2,7 @@
 
 **作成日**: 2025-11-14
 **最終更新**: 2025-12-20
-**進捗**: Step 0〜13 完了！🎉 Addition Chain で 4.2B keys/sec 達成！🔥
+**進捗**: Step 0〜14 完了！🎉 インライン PTX で 4.3B keys/sec 達成！🔥🔥🔥
 
 ---
 
@@ -25,6 +25,7 @@
 | Step 11 | Constant Memory（patterns/masks、複数 prefix 時 +3.0%）| ✅ 完了 🔥 |
 | Step 12 | Max Prefix 256（64 → 256 に拡張、速度影響なし）| ✅ 完了 🔥 |
 | Step 13 | Addition Chain（_ModInv 乗算 128→14、+1.4%）| ✅ 完了 🔥🔥🔥 |
+| Step 14 | インライン PTX（_Add256/_Sub256、+2.7%）| ✅ 完了 🔥🔥🔥 |
 
 ---
 
@@ -55,11 +56,12 @@
 | GPU + dG テーブルプリコンピュート（_PointMult 削減） | 4.135B keys/sec | 59,071x |
 | GPU + Blocking Sync（CPU 使用率 1%） | 4.136B keys/sec | 59,086x |
 | GPU + Constant Memory（patterns/masks） | 4.141B keys/sec | 59,157x |
-| **GPU + Addition Chain（_ModInv 乗算 128→14）** | **4.199B keys/sec** | **59,991x** 🔥🔥🔥 |
+| GPU + Addition Chain（_ModInv 乗算 128→14） | 4.199B keys/sec | 59,991x |
+| **GPU + インライン PTX（_Add256/_Sub256 carry chain）** | **4.313B keys/sec** | **61,614x** 🔥🔥🔥 |
 
-**8文字 prefix が約 4.4 分で見つかる！** 🎉
+**8文字 prefix が約 4.3 分で見つかる！** 🎉
 **CPU 使用率が 100% → 1% に削減！電力消費大幅削減！** 💡
-**32 prefix 時：4.011B keys/sec（大台突破！）** 💪
+**32 prefix 時：4.105B keys/sec（大台突破！）** 💪
 
 ---
 
@@ -670,6 +672,58 @@ x176 = a^(2^176-1), x220 = a^(2^220-1), x223 = a^(2^223-1)
 - **Addition Chain は数学的概念**：ライセンス制約なし、自由に実装可能
 - **中間変数のメモ化は有効**：GPU でもレジスタ圧が許容範囲なら効果大
 - **32 prefix でも 4B 突破！**：大台に乗った 🎉
+
+---
+
+## ✅ Step 14: インライン PTX（2025-12-20 完了）🔥🔥🔥
+
+### 背景
+
+- PTX の carry chain 命令（`add.cc`/`addc.cc`）は **32-bit 専用**
+- NVCC は 64-bit carry を `setp.lt.u64` + `selp.u64` の 3 命令で実装
+- インライン PTX で 32-bit carry chain を使えば、1 命令で carry を伝播できる
+
+### 実装内容
+
+**`_Add256` と `_Sub256` を PTX carry chain で書き換え**：
+
+```cuda
+asm volatile (
+    "add.cc.u32   %0, %9, %17;\n\t"    // r0 = a0 + b0, carry out
+    "addc.cc.u32  %1, %10, %18;\n\t"   // r1 = a1 + b1 + carry
+    ...
+    "addc.u32     %8, 0, 0;\n\t"       // c = 0 + 0 + carry（最終 carry）
+    : "=r"(r0), "=r"(r1), ... "=r"(c)
+    : "r"(a0), "r"(a1), ... "r"(b7)
+);
+```
+
+**PTX carry chain 命令**：
+| 命令 | 意味 |
+|------|------|
+| `add.cc.u32` | 加算 + carry 出力 |
+| `addc.cc.u32` | 加算 + carry 入出力 |
+| `addc.u32` | 加算 + carry 入力のみ |
+
+### 結果 🎉
+
+| ケース | Before | After | 変化 |
+|--------|--------|-------|------|
+| **1 prefix** | 4.199B | **4.313B** | **+2.7%** 🔥 |
+| **32 prefix** | 4.011B | **4.105B** | **+2.3%** 🔥 |
+
+### 学び 💡
+
+- **GPU の ALU は 32-bit が基本単位**：64-bit 演算も内部では 32-bit × 2 に分解
+- **PTX の cvt 命令は SASS で消える**：レジスタ割り当てで解決（変換コストなし）
+- **SASS の `IADD3`/`IADD3.X` が carry chain をネイティブサポート**
+- **WSL と Windows で結果が異なる**：WSL では -12%、Windows では +2.7%（JIT 最適化の違い？）
+- **インライン PTX は有効な最適化手法**：256-bit 演算が多い secp256k1 に特に効果的
+
+### 今後の展望 🚀
+
+- `_ModAdd` / `_ModSub` も PTX 化を検討
+- さらに数 % の改善が期待できる
 
 ---
 

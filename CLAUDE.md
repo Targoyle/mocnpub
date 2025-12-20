@@ -253,11 +253,12 @@
 | GPU + Sequential Key Strategy（VRAM 99.99%削減、1600 keys/thread） | 3.67B keys/sec | 52,429x |
 | GPU + dG テーブルプリコンピュート（_PointMult 削減） | 4.135B keys/sec | 59,071x |
 | GPU + Constant Memory（patterns/masks） | 4.141B keys/sec | 59,157x |
-| **GPU + Addition Chain（_ModInv 乗算 128→14）** | **4.199B keys/sec** | **59,991x** 🔥🔥🔥 |
+| GPU + Addition Chain（_ModInv 乗算 128→14） | 4.199B keys/sec | 59,991x |
+| **GPU + インライン PTX（_Add256/_Sub256 carry chain）** | **4.313B keys/sec** | **61,614x** 🔥🔥🔥 |
 
-**8文字 prefix が約 4.4 分で見つかる！** 🎉
+**8文字 prefix が約 4.3 分で見つかる！** 🎉
 
-**32 prefix 時：4.011B keys/sec（+1.4% 高速化）** 💪
+**32 prefix 時：4.105B keys/sec** 💪
 
 ---
 
@@ -287,6 +288,7 @@
 | **32-bit Prefix Matching** | **+1.2%**（32 prefix 時: 3.793B→3.839B、1 prefix 時は変化なし） 🔥 | ✅ 完了 |
 | **Constant Memory（patterns/masks）** | **+3.0%**（32 prefix 時: 3.839B→3.954B、専用キャッシュ＋ブロードキャスト最適化） 🔥 | ✅ 完了 |
 | **Addition Chain（_ModInv）** | **+1.4%**（乗算 128→14 回、RustCrypto k256 / Peter Dettman 参考） 🔥 | ✅ 完了 |
+| **インライン PTX（_Add256/_Sub256）** | **+2.7%**（32-bit carry chain、SASS で cvt 消滅） 🔥🔥🔥 | ✅ 完了 |
 
 #### エンドモルフィズムの仕組み
 
