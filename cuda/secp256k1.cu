@@ -7,35 +7,30 @@
 #include <stdint.h>
 
 // ============================================================================
-// secp256k1 Constants
+// secp256k1 Constants (compile-time #define for PTX immediate embedding)
 // ============================================================================
 
 // Prime p = 2^256 - 2^32 - 977
 // 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-__constant__ uint64_t _P[4] = {
-    0xFFFFFFFEFFFFFC2FULL,
-    0xFFFFFFFFFFFFFFFFULL,
-    0xFFFFFFFFFFFFFFFFULL,
-    0xFFFFFFFFFFFFFFFFULL
-};
+// Note: P1=P2=P3 are all 0xFFFFFFFFFFFFFFFF (special form used for optimization)
+#define P0 0xFFFFFFFEFFFFFC2FULL
+#define P1 0xFFFFFFFFFFFFFFFFULL
+#define P2 0xFFFFFFFFFFFFFFFFULL
+#define P3 0xFFFFFFFFFFFFFFFFULL
 
 // Generator point G (x coordinate)
 // 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
-__constant__ uint64_t _Gx[4] = {
-    0x59F2815B16F81798ULL,
-    0x029BFCDB2DCE28D9ULL,
-    0x55A06295CE870B07ULL,
-    0x79BE667EF9DCBBACULL
-};
+#define GX0 0x59F2815B16F81798ULL
+#define GX1 0x029BFCDB2DCE28D9ULL
+#define GX2 0x55A06295CE870B07ULL
+#define GX3 0x79BE667EF9DCBBACULL
 
 // Generator point G (y coordinate)
 // 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
-__constant__ uint64_t _Gy[4] = {
-    0x9C47D08FFB10D4B8ULL,
-    0xFD17B448A6855419ULL,
-    0x5DA4FBFC0E1108A8ULL,
-    0x483ADA7726A3C465ULL
-};
+#define GY0 0x9C47D08FFB10D4B8ULL
+#define GY1 0xFD17B448A6855419ULL
+#define GY2 0x5DA4FBFC0E1108A8ULL
+#define GY3 0x483ADA7726A3C465ULL
 
 // ============================================================================
 // Endomorphism Constants (for 3x speedup)
@@ -45,21 +40,17 @@ __constant__ uint64_t _Gy[4] = {
 
 // β = cube root of unity mod p
 // 0x7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee
-__constant__ uint64_t _Beta[4] = {
-    0xc1396c28719501eeULL,
-    0x9cf0497512f58995ULL,
-    0x6e64479eac3434e9ULL,
-    0x7ae96a2b657c0710ULL
-};
+#define BETA0 0xc1396c28719501eeULL
+#define BETA1 0x9cf0497512f58995ULL
+#define BETA2 0x6e64479eac3434e9ULL
+#define BETA3 0x7ae96a2b657c0710ULL
 
 // β² = β * β mod p
 // 0x851695d49a83f8ef919bb86153cbcb16630fb68aed0a766a3ec693d68e6afa40
-__constant__ uint64_t _Beta2[4] = {
-    0x3ec693d68e6afa40ULL,
-    0x630fb68aed0a766aULL,
-    0x919bb86153cbcb16ULL,
-    0x851695d49a83f8efULL
-};
+#define BETA2_0 0x3ec693d68e6afa40ULL
+#define BETA2_1 0x630fb68aed0a766aULL
+#define BETA2_2 0x919bb86153cbcb16ULL
+#define BETA2_3 0x851695d49a83f8efULL
 
 // ============================================================================
 // dG Table for Sequential Key Strategy (precomputed at runtime)
@@ -151,6 +142,9 @@ __device__ int _Compare256(const uint64_t a[4], const uint64_t b[4])
  */
 __device__ void _ModAdd(const uint64_t a[4], const uint64_t b[4], uint64_t result[4])
 {
+    // P as compile-time constants
+    const uint64_t p[4] = {P0, P1, P2, P3};
+
     // Always compute sum = a + b
     uint64_t sum[4];
     uint64_t carry;
@@ -159,7 +153,7 @@ __device__ void _ModAdd(const uint64_t a[4], const uint64_t b[4], uint64_t resul
     // Always compute diff = sum - p (may underflow)
     uint64_t diff[4];
     uint64_t borrow;
-    _Sub256(sum, _P, diff, &borrow);
+    _Sub256(sum, p, diff, &borrow);
 
     // Use diff if: carry || !borrow (i.e., sum >= p or overflow)
     // use_diff = carry | (1 - borrow)
@@ -187,11 +181,12 @@ __device__ void _ModSub(const uint64_t a[4], const uint64_t b[4], uint64_t resul
     // mask = borrow ? 0xFFFFFFFFFFFFFFFF : 0
     uint64_t mask = -borrow;
 
-    // diff + (p & mask)
+    // diff + (p & mask) - unrolled with #define constants
     uint64_t p_masked[4];
-    for (int i = 0; i < 4; i++) {
-        p_masked[i] = _P[i] & mask;
-    }
+    p_masked[0] = P0 & mask;
+    p_masked[1] = P1 & mask;
+    p_masked[2] = P2 & mask;
+    p_masked[3] = P3 & mask;
 
     uint64_t carry;
     _Add256(diff, p_masked, result, &carry);
@@ -347,30 +342,62 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
 
     // Now reduce: while temp >= p, subtract p
     // At most 2-3 iterations needed
+    // Using #define constants for P (P1=P2=P3=0xFFFFFFFFFFFFFFFF)
     for (int iter = 0; iter < 3; iter++) {
         // Check if temp >= p
+        // Since P1=P2=P3=max_uint64, comparison is simplified:
+        // - If any of temp[3,2,1] < max_uint64, then temp < p
+        // - Otherwise check temp[0] >= P0
         bool ge = false;
         if (temp[4] > 0) {
             ge = true;
+        } else if (temp[3] < P3) {
+            ge = false;
+        } else if (temp[2] < P2) {
+            ge = false;
+        } else if (temp[1] < P1) {
+            ge = false;
         } else {
-            // Compare temp[0..3] with p
-            ge = _Compare256(temp, _P) >= 0;
+            // temp[3]=temp[2]=temp[1]=0xFFFFFFFFFFFFFFFF, check temp[0] vs P0
+            ge = temp[0] >= P0;
         }
 
         if (ge) {
-            // Subtract p from temp (320-bit - 256-bit)
+            // Subtract p from temp (320-bit - 256-bit) - unrolled
             uint64_t borrow = 0;
-            for (int i = 0; i < 4; i++) {
-                // Two-stage subtraction to avoid overflow in borrow detection
-                uint64_t temp_diff = temp[i] - _P[i];
-                uint64_t borrow1 = (temp[i] < _P[i]) ? 1 : 0;
 
-                uint64_t final_diff = temp_diff - borrow;
-                uint64_t borrow2 = (temp_diff < borrow) ? 1 : 0;
+            // i = 0
+            uint64_t temp_diff0 = temp[0] - P0;
+            uint64_t borrow1_0 = (temp[0] < P0) ? 1 : 0;
+            uint64_t final_diff0 = temp_diff0 - borrow;
+            uint64_t borrow2_0 = (temp_diff0 < borrow) ? 1 : 0;
+            temp[0] = final_diff0;
+            borrow = borrow1_0 | borrow2_0;
 
-                temp[i] = final_diff;
-                borrow = borrow1 | borrow2;
-            }
+            // i = 1
+            uint64_t temp_diff1 = temp[1] - P1;
+            uint64_t borrow1_1 = (temp[1] < P1) ? 1 : 0;
+            uint64_t final_diff1 = temp_diff1 - borrow;
+            uint64_t borrow2_1 = (temp_diff1 < borrow) ? 1 : 0;
+            temp[1] = final_diff1;
+            borrow = borrow1_1 | borrow2_1;
+
+            // i = 2
+            uint64_t temp_diff2 = temp[2] - P2;
+            uint64_t borrow1_2 = (temp[2] < P2) ? 1 : 0;
+            uint64_t final_diff2 = temp_diff2 - borrow;
+            uint64_t borrow2_2 = (temp_diff2 < borrow) ? 1 : 0;
+            temp[2] = final_diff2;
+            borrow = borrow1_2 | borrow2_2;
+
+            // i = 3
+            uint64_t temp_diff3 = temp[3] - P3;
+            uint64_t borrow1_3 = (temp[3] < P3) ? 1 : 0;
+            uint64_t final_diff3 = temp_diff3 - borrow;
+            uint64_t borrow2_3 = (temp_diff3 < borrow) ? 1 : 0;
+            temp[3] = final_diff3;
+            borrow = borrow1_3 | borrow2_3;
+
             // Subtract borrow from temp[4]
             temp[4] -= borrow;
         } else {
@@ -413,6 +440,66 @@ __device__ void _ModMult(const uint64_t a[4], const uint64_t b[4], uint64_t resu
     }
 
     // Reduce modulo p
+    _Reduce512(temp, result);
+}
+
+/**
+ * Modular multiplication by Beta: (a * β) mod p
+ * Uses compile-time #define constants for β (BETA0-BETA3)
+ */
+__device__ void _ModMultByBeta(const uint64_t a[4], uint64_t result[4])
+{
+    const uint64_t beta[4] = {BETA0, BETA1, BETA2, BETA3};
+    uint64_t temp[8] = {0};
+
+    for (int i = 0; i < 4; i++) {
+        uint64_t carry = 0;
+        for (int j = 0; j < 4; j++) {
+            uint64_t low, high;
+            _Mult64(a[i], beta[j], &low, &high);
+
+            uint64_t s1 = temp[i + j] + low;
+            uint64_t carry1 = (s1 < temp[i + j]) ? 1 : 0;
+
+            uint64_t s2 = s1 + carry;
+            uint64_t carry2 = (s2 < s1) ? 1 : 0;
+
+            temp[i + j] = s2;
+            carry = high + carry1 + carry2;
+        }
+        temp[i + 4] += carry;
+    }
+
+    _Reduce512(temp, result);
+}
+
+/**
+ * Modular multiplication by Beta²: (a * β²) mod p
+ * Uses compile-time #define constants for β² (BETA2_0-BETA2_3)
+ */
+__device__ void _ModMultByBeta2(const uint64_t a[4], uint64_t result[4])
+{
+    const uint64_t beta2[4] = {BETA2_0, BETA2_1, BETA2_2, BETA2_3};
+    uint64_t temp[8] = {0};
+
+    for (int i = 0; i < 4; i++) {
+        uint64_t carry = 0;
+        for (int j = 0; j < 4; j++) {
+            uint64_t low, high;
+            _Mult64(a[i], beta2[j], &low, &high);
+
+            uint64_t s1 = temp[i + j] + low;
+            uint64_t carry1 = (s1 < temp[i + j]) ? 1 : 0;
+
+            uint64_t s2 = s1 + carry;
+            uint64_t carry2 = (s2 < s1) ? 1 : 0;
+
+            temp[i + j] = s2;
+            carry = high + carry1 + carry2;
+        }
+        temp[i + 4] += carry;
+    }
+
     _Reduce512(temp, result);
 }
 
@@ -689,6 +776,69 @@ __device__ void _PointAddMixed(
     // Z3 = Z1 * H (since Z2 = 1)
     _ModMult(Z1, H, Z3);                     // M8: Z3
     // Total: 8M + 3S (optimized by reusing X1*H^2)
+}
+
+/**
+ * Mixed Point Addition with Generator G: (X1, Y1, Z1) + G
+ *
+ * Specialized version of _PointAddMixed that uses the generator point G
+ * with compile-time #define constants (GX0-GX3, GY0-GY3).
+ *
+ * Cost: 8M + 3S (same as _PointAddMixed)
+ */
+__device__ void _PointAddMixedG(
+    const uint64_t X1[4], const uint64_t Y1[4], const uint64_t Z1[4],
+    uint64_t X3[4], uint64_t Y3[4], uint64_t Z3[4]
+)
+{
+    // Generator point G as compile-time constants
+    const uint64_t Gx[4] = {GX0, GX1, GX2, GX3};
+    const uint64_t Gy[4] = {GY0, GY1, GY2, GY3};
+
+    uint64_t Z1_squared[4], Z1_cubed[4];
+    uint64_t U2[4], S2[4];
+    uint64_t H[4], H_squared[4], H_cubed[4];
+    uint64_t R[4], R_squared[4];
+    uint64_t X1_H2[4];
+    uint64_t temp[4], temp2[4];
+
+    // Z1^2 and Z1^3
+    _ModSquare(Z1, Z1_squared);
+    _ModMult(Z1_squared, Z1, Z1_cubed);
+
+    // U2 = Gx * Z1^2
+    _ModMult(Gx, Z1_squared, U2);
+
+    // S2 = Gy * Z1^3
+    _ModMult(Gy, Z1_cubed, S2);
+
+    // H = U2 - X1
+    _ModSub(U2, X1, H);
+
+    // R = S2 - Y1
+    _ModSub(S2, Y1, R);
+
+    // H^2 and H^3
+    _ModSquare(H, H_squared);
+    _ModMult(H_squared, H, H_cubed);
+
+    // R^2
+    _ModSquare(R, R_squared);
+
+    // X3 = R^2 - H^3 - 2*X1*H^2
+    _ModMult(X1, H_squared, X1_H2);
+    _ModAdd(X1_H2, X1_H2, temp);
+    _ModSub(R_squared, H_cubed, temp2);
+    _ModSub(temp2, temp, X3);
+
+    // Y3 = R * (X1*H^2 - X3) - Y1*H^3
+    _ModSub(X1_H2, X3, temp);
+    _ModMult(R, temp, temp2);
+    _ModMult(Y1, H_cubed, temp);
+    _ModSub(temp2, temp, Y3);
+
+    // Z3 = Z1 * H
+    _ModMult(Z1, H, Z3);
 }
 
 /**
@@ -1068,7 +1218,7 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
     // Generate subsequent points using P = P + G
     for (uint32_t key_idx = 1; key_idx < n; key_idx++) {
         uint64_t tempX[4], tempY[4], tempZ[4];
-        _PointAddMixed(Px, Py, Pz, _Gx, _Gy, tempX, tempY, tempZ);
+        _PointAddMixedG(Px, Py, Pz, tempX, tempY, tempZ);
 
         for (int i = 0; i < 4; i++) {
             Px[i] = tempX[i];
@@ -1109,8 +1259,8 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
 
         // Endomorphism: compute β*x and β²*x
         uint64_t x_beta[4], x_beta2[4];
-        _ModMult(x, _Beta, x_beta);
-        _ModMult(x, _Beta2, x_beta2);
+        _ModMultByBeta(x, x_beta);
+        _ModMultByBeta2(x, x_beta2);
 
         uint64_t* x_coords[3] = { x, x_beta, x_beta2 };
 
