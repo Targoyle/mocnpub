@@ -1,8 +1,8 @@
 # mocnpub タスクリスト 📋
 
 **作成日**: 2025-11-14
-**最終更新**: 2025-12-20
-**進捗**: Step 0〜14 完了！🎉 インライン PTX で 4.3B keys/sec 達成！🔥🔥🔥
+**最終更新**: 2025-12-21
+**進捗**: Step 0〜15 完了！🎉 _Add64/_Addc64 で 4.5B keys/sec 達成！🔥🔥🔥
 
 ---
 
@@ -26,6 +26,7 @@
 | Step 12 | Max Prefix 256（64 → 256 に拡張、速度影響なし）| ✅ 完了 🔥 |
 | Step 13 | Addition Chain（_ModInv 乗算 128→14、+1.4%）| ✅ 完了 🔥🔥🔥 |
 | Step 14 | インライン PTX（_Add256/_Sub256、+2.7%）| ✅ 完了 🔥🔥🔥 |
+| Step 15 | _Add64/_Addc64 で _Reduce512 最適化（+5.1%）| ✅ 完了 🔥🔥🔥 |
 
 ---
 
@@ -57,11 +58,12 @@
 | GPU + Blocking Sync（CPU 使用率 1%） | 4.136B keys/sec | 59,086x |
 | GPU + Constant Memory（patterns/masks） | 4.141B keys/sec | 59,157x |
 | GPU + Addition Chain（_ModInv 乗算 128→14） | 4.199B keys/sec | 59,991x |
-| **GPU + インライン PTX（_Add256/_Sub256 carry chain）** | **4.313B keys/sec** | **61,614x** 🔥🔥🔥 |
+| GPU + インライン PTX（_Add256/_Sub256 carry chain） | 4.313B keys/sec | 61,614x |
+| **GPU + _Add64/_Addc64 で _Reduce512 最適化** | **4.532B keys/sec** | **64,743x** 🔥🔥🔥 |
 
-**8文字 prefix が約 4.3 分で見つかる！** 🎉
+**8文字 prefix が約 4 分で見つかる！** 🎉
 **CPU 使用率が 100% → 1% に削減！電力消費大幅削減！** 💡
-**32 prefix 時：4.105B keys/sec（大台突破！）** 💪
+**32 prefix 時：4.308B keys/sec** 💪
 
 ---
 
@@ -722,8 +724,69 @@ asm volatile (
 
 ### 今後の展望 🚀
 
-- `_ModAdd` / `_ModSub` も PTX 化を検討
+- `_ReduceOverflow` や他の関数も `_Add64`/`_Addc64` で置き換え
 - さらに数 % の改善が期待できる
+
+---
+
+## ✅ Step 15: _Add64/_Addc64 で _Reduce512 最適化（2025-12-21 完了）🔥🔥🔥
+
+### 背景
+
+- Step 14 で `_Add256`/`_Sub256` を PTX 化して +2.7% 達成
+- `_Reduce512` 内にも `(sum < a) ? 1 : 0` パターンが大量にあった
+- 64-bit 単位の加算プリミティブを作って置き換えを試みる
+
+### 実装内容
+
+**新しい 64-bit プリミティブを追加**：
+
+```cuda
+// carry-in なし（3 PTX 命令）
+uint32_t _Add64(uint64_t a, uint64_t b, uint64_t* sum);
+
+// carry-in あり（6 PTX 命令）
+uint32_t _Addc64(uint64_t a, uint64_t b, uint32_t carry_in, uint64_t* sum);
+```
+
+**`_Reduce512` の 3 箇所を置き換え**：
+
+1. `high * 977` の carry 処理
+2. `shifted + mult977` (5 limbs) の加算
+3. `temp + sum` (5 limbs) の加算
+
+**Before（各箇所 8 行）**：
+```cuda
+uint64_t s1 = shifted[i] + mult977[i];
+uint64_t carry1 = (s1 < shifted[i]) ? 1 : 0;
+uint64_t s2 = s1 + carry;
+uint64_t carry2 = (s2 < s1) ? 1 : 0;
+sum[i] = s2;
+carry = carry1 | carry2;
+```
+
+**After（各箇所 3-4 行）**：
+```cuda
+c = _Add64(shifted[0], mult977[0], &sum[0]);
+for (int i = 1; i < 5; i++) {
+    c = _Addc64(shifted[i], mult977[i], c, &sum[i]);
+}
+```
+
+### 結果 🎉
+
+| ケース | Before | After | 変化 |
+|--------|--------|-------|------|
+| **1 prefix** | 4.313B | **4.532B** | **+5.1%** 🔥🔥🔥 |
+| **32 prefix** | 4.105B | **4.308B** | **+4.9%** 🔥🔥🔥 |
+
+**CPU 比 64,743 倍！** 🚀
+
+### 学び 💡
+
+- **キャリーをキャリーとして計算することが重要**：`(sum < a) ? 1 : 0` は PTX で `setp + selp` になるが、PTX carry chain は 1 命令で carry を伝播
+- **`_Reduce512` は頻繁に呼ばれる**：`_ModMult` の中で使われるため、最適化効果が大きい
+- **64-bit プリミティブの汎用性**：他の関数（`_ReduceOverflow` 等）にも適用可能
 
 ---
 
