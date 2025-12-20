@@ -536,11 +536,15 @@ __device__ void _ModMult(const uint64_t a[4], const uint64_t b[4], uint64_t resu
             uint64_t low, high;
             _Mult64(a[i], b[j], &low, &high);
 
-            // Add low + carry to temp[i+j] using PTX carry chain
-            uint64_t s1;
-            uint32_t c1 = _Add64(temp[i + j], low, &s1);
-            uint32_t c2 = _Add64(s1, carry, &temp[i + j]);
-            carry = high + c1 + c2;
+            // Add to temp[i+j] with proper carry detection (two-stage)
+            uint64_t s1 = temp[i + j] + low;
+            uint64_t carry1 = (s1 < temp[i + j]) ? 1 : 0;
+
+            uint64_t s2 = s1 + carry;
+            uint64_t carry2 = (s2 < s1) ? 1 : 0;
+
+            temp[i + j] = s2;
+            carry = high + carry1 + carry2;
         }
         temp[i + 4] += carry;
     }
@@ -564,11 +568,14 @@ __device__ void _ModMultByBeta(const uint64_t a[4], uint64_t result[4])
             uint64_t low, high;
             _Mult64(a[i], beta[j], &low, &high);
 
-            // Add low + carry to temp[i+j] using PTX carry chain
-            uint64_t s1;
-            uint32_t c1 = _Add64(temp[i + j], low, &s1);
-            uint32_t c2 = _Add64(s1, carry, &temp[i + j]);
-            carry = high + c1 + c2;
+            uint64_t s1 = temp[i + j] + low;
+            uint64_t carry1 = (s1 < temp[i + j]) ? 1 : 0;
+
+            uint64_t s2 = s1 + carry;
+            uint64_t carry2 = (s2 < s1) ? 1 : 0;
+
+            temp[i + j] = s2;
+            carry = high + carry1 + carry2;
         }
         temp[i + 4] += carry;
     }
@@ -591,11 +598,14 @@ __device__ void _ModMultByBeta2(const uint64_t a[4], uint64_t result[4])
             uint64_t low, high;
             _Mult64(a[i], beta2[j], &low, &high);
 
-            // Add low + carry to temp[i+j] using PTX carry chain
-            uint64_t s1;
-            uint32_t c1 = _Add64(temp[i + j], low, &s1);
-            uint32_t c2 = _Add64(s1, carry, &temp[i + j]);
-            carry = high + c1 + c2;
+            uint64_t s1 = temp[i + j] + low;
+            uint64_t carry1 = (s1 < temp[i + j]) ? 1 : 0;
+
+            uint64_t s2 = s1 + carry;
+            uint64_t carry2 = (s2 < s1) ? 1 : 0;
+
+            temp[i + j] = s2;
+            carry = high + carry1 + carry2;
         }
         temp[i + 4] += carry;
     }
@@ -625,11 +635,15 @@ __device__ void _ModSquare(const uint64_t a[4], uint64_t result[4])
             uint64_t low, high;
             _Mult64(a[i], a[j], &low, &high);
 
-            // Add low + carry to cross[i+j] using PTX carry chain
-            uint64_t s1;
-            uint32_t c1 = _Add64(cross[i + j], low, &s1);
-            uint32_t c2 = _Add64(s1, carry, &cross[i + j]);
-            carry = high + c1 + c2;
+            // Add to cross[i+j] with carry
+            uint64_t s1 = cross[i + j] + low;
+            uint64_t carry1 = (s1 < cross[i + j]) ? 1 : 0;
+
+            uint64_t s2 = s1 + carry;
+            uint64_t carry2 = (s2 < s1) ? 1 : 0;
+
+            cross[i + j] = s2;
+            carry = high + carry1 + carry2;
         }
         if (i < 3) {
             cross[i + 4] += carry;
@@ -649,23 +663,35 @@ __device__ void _ModSquare(const uint64_t a[4], uint64_t result[4])
         uint64_t low, high;
         _Mult64(a[i], a[i], &low, &high);
 
-        // Add (low, high) to temp[2*i], temp[2*i+1] using PTX carry chain
-        uint32_t c1 = _Add64(temp[2 * i], low, &temp[2 * i]);
-        uint32_t c2 = _Addc64(temp[2 * i + 1], high, c1, &temp[2 * i + 1]);
+        // Add to temp[2*i] and temp[2*i+1]
+        uint64_t s1 = temp[2 * i] + low;
+        uint64_t carry1 = (s1 < temp[2 * i]) ? 1 : 0;
+        temp[2 * i] = s1;
+
+        uint64_t s2 = temp[2 * i + 1] + high;
+        uint64_t carry2 = (s2 < temp[2 * i + 1]) ? 1 : 0;
+
+        uint64_t s3 = s2 + carry1;
+        uint64_t carry3 = (s3 < s2) ? 1 : 0;
+        temp[2 * i + 1] = s3;
 
         // Propagate carry to higher limbs
         if (2 * i + 2 < 8) {
-            temp[2 * i + 2] += c2;
+            temp[2 * i + 2] += carry2 + carry3;
         }
     }
 
-    // Step 3: Add doubled cross products to temp using PTX carry chain
-    uint32_t carry = 0;
+    // Step 3: Add doubled cross products to temp
+    uint64_t carry = 0;
     for (int i = 0; i < 8; i++) {
-        uint64_t s1;
-        uint32_t c1 = _Add64(temp[i], cross[i], &s1);
-        carry = _Addc64(s1, 0, carry, &temp[i]);
-        carry |= c1;
+        uint64_t s1 = temp[i] + cross[i];
+        uint64_t carry1 = (s1 < temp[i]) ? 1 : 0;
+
+        uint64_t s2 = s1 + carry;
+        uint64_t carry2 = (s2 < s1) ? 1 : 0;
+
+        temp[i] = s2;
+        carry = carry1 | carry2;
     }
 
     // Reduce modulo p
