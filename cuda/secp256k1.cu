@@ -963,6 +963,19 @@ __device__ void _ModSquare(const uint64_t a[4], uint64_t result[4])
 }
 
 /**
+ * Compute a^2 and a^3 simultaneously
+ * Returns both a_squared = a^2 and a_cubed = a^3
+ *
+ * This is useful when both values are needed (e.g., in _ModInv Addition Chain)
+ * Future optimization: lazy reduction could reduce the number of full reductions
+ */
+__device__ void _ModCubic(const uint64_t a[4], uint64_t a_squared[4], uint64_t a_cubed[4])
+{
+    _ModSquare(a, a_squared);           // a^2
+    _ModMult(a_squared, a, a_cubed);    // a^3 = a^2 * a
+}
+
+/**
  * Modular inverse: a^(-1) mod p
  * Uses Fermat's Little Theorem: a^(p-2) mod p = a^(-1) mod p
  *
@@ -980,9 +993,8 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
     uint64_t x22[4], x44[4], x88[4], x176[4], x220[4], x223[4];
     uint64_t t[4];
 
-    // x2 = a^3 (binary: 11)
-    _ModSquare(a, t);           // a^2
-    _ModMult(t, a, x2);         // a^3
+    // x2 = a^3 (binary: 11), t = a^2
+    _ModCubic(a, t, x2);        // a^2 and a^3 simultaneously
 
     // x3 = a^7 (binary: 111)
     _ModSquare(x2, t);          // a^6
