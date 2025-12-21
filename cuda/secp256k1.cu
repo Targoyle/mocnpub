@@ -258,6 +258,77 @@ __device__ uint32_t _Add128(uint64_t a[2], uint64_t b0, uint64_t b1)
 }
 
 /**
+ * Add 512-bit numbers in-place
+ * a[0..7] += b[0..7]
+ *
+ * Uses PTX 32-bit carry chain for efficiency.
+ * Replaces _Add64x3 loop (48 PTX instructions → 17 instructions).
+ */
+__device__ void _Add512(uint64_t a[8], const uint64_t b[8])
+{
+    uint32_t a0  = (uint32_t)a[0];  uint32_t a1  = (uint32_t)(a[0] >> 32);
+    uint32_t a2  = (uint32_t)a[1];  uint32_t a3  = (uint32_t)(a[1] >> 32);
+    uint32_t a4  = (uint32_t)a[2];  uint32_t a5  = (uint32_t)(a[2] >> 32);
+    uint32_t a6  = (uint32_t)a[3];  uint32_t a7  = (uint32_t)(a[3] >> 32);
+    uint32_t a8  = (uint32_t)a[4];  uint32_t a9  = (uint32_t)(a[4] >> 32);
+    uint32_t a10 = (uint32_t)a[5];  uint32_t a11 = (uint32_t)(a[5] >> 32);
+    uint32_t a12 = (uint32_t)a[6];  uint32_t a13 = (uint32_t)(a[6] >> 32);
+    uint32_t a14 = (uint32_t)a[7];  uint32_t a15 = (uint32_t)(a[7] >> 32);
+
+    uint32_t b0  = (uint32_t)b[0];  uint32_t b1  = (uint32_t)(b[0] >> 32);
+    uint32_t b2  = (uint32_t)b[1];  uint32_t b3  = (uint32_t)(b[1] >> 32);
+    uint32_t b4  = (uint32_t)b[2];  uint32_t b5  = (uint32_t)(b[2] >> 32);
+    uint32_t b6  = (uint32_t)b[3];  uint32_t b7  = (uint32_t)(b[3] >> 32);
+    uint32_t b8  = (uint32_t)b[4];  uint32_t b9  = (uint32_t)(b[4] >> 32);
+    uint32_t b10 = (uint32_t)b[5];  uint32_t b11 = (uint32_t)(b[5] >> 32);
+    uint32_t b12 = (uint32_t)b[6];  uint32_t b13 = (uint32_t)(b[6] >> 32);
+    uint32_t b14 = (uint32_t)b[7];  uint32_t b15 = (uint32_t)(b[7] >> 32);
+
+    uint32_t r0, r1, r2, r3, r4, r5, r6, r7;
+    uint32_t r8, r9, r10, r11, r12, r13, r14, r15;
+
+    asm volatile (
+        "add.cc.u32   %0,  %16, %32;\n\t"
+        "addc.cc.u32  %1,  %17, %33;\n\t"
+        "addc.cc.u32  %2,  %18, %34;\n\t"
+        "addc.cc.u32  %3,  %19, %35;\n\t"
+        "addc.cc.u32  %4,  %20, %36;\n\t"
+        "addc.cc.u32  %5,  %21, %37;\n\t"
+        "addc.cc.u32  %6,  %22, %38;\n\t"
+        "addc.cc.u32  %7,  %23, %39;\n\t"
+        "addc.cc.u32  %8,  %24, %40;\n\t"
+        "addc.cc.u32  %9,  %25, %41;\n\t"
+        "addc.cc.u32  %10, %26, %42;\n\t"
+        "addc.cc.u32  %11, %27, %43;\n\t"
+        "addc.cc.u32  %12, %28, %44;\n\t"
+        "addc.cc.u32  %13, %29, %45;\n\t"
+        "addc.cc.u32  %14, %30, %46;\n\t"
+        "addc.u32     %15, %31, %47;\n\t"
+        : "=r"(r0),  "=r"(r1),  "=r"(r2),  "=r"(r3),
+          "=r"(r4),  "=r"(r5),  "=r"(r6),  "=r"(r7),
+          "=r"(r8),  "=r"(r9),  "=r"(r10), "=r"(r11),
+          "=r"(r12), "=r"(r13), "=r"(r14), "=r"(r15)
+        : "r"(a0),  "r"(a1),  "r"(a2),  "r"(a3),
+          "r"(a4),  "r"(a5),  "r"(a6),  "r"(a7),
+          "r"(a8),  "r"(a9),  "r"(a10), "r"(a11),
+          "r"(a12), "r"(a13), "r"(a14), "r"(a15),
+          "r"(b0),  "r"(b1),  "r"(b2),  "r"(b3),
+          "r"(b4),  "r"(b5),  "r"(b6),  "r"(b7),
+          "r"(b8),  "r"(b9),  "r"(b10), "r"(b11),
+          "r"(b12), "r"(b13), "r"(b14), "r"(b15)
+    );
+
+    a[0] = ((uint64_t)r1  << 32) | r0;
+    a[1] = ((uint64_t)r3  << 32) | r2;
+    a[2] = ((uint64_t)r5  << 32) | r4;
+    a[3] = ((uint64_t)r7  << 32) | r6;
+    a[4] = ((uint64_t)r9  << 32) | r8;
+    a[5] = ((uint64_t)r11 << 32) | r10;
+    a[6] = ((uint64_t)r13 << 32) | r12;
+    a[7] = ((uint64_t)r15 << 32) | r14;
+}
+
+/**
  * Add two 64-bit numbers with carry-in (a + b + carry_in)
  * Returns carry-out (0 or 1)
  *
@@ -803,12 +874,8 @@ __device__ void _ModSquare(const uint64_t a[4], uint64_t result[4])
         }
     }
 
-    // Step 3: Add doubled cross products to temp using PTX carry chain
-    uint64_t carry = 0;
-    for (int i = 0; i < 8; i++) {
-        uint32_t c = _Add64x3(temp[i], cross[i], carry, &temp[i]);
-        carry = c;
-    }
+    // Step 3: Add doubled cross products to temp using single PTX call (16 instructions)
+    _Add512(temp, cross);
 
     // Reduce modulo p
     _Reduce512(temp, result);
