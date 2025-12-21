@@ -623,12 +623,11 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
         }
 
         if (ge) {
-            // Subtract p from temp using PTX borrow chain
-            uint32_t borrow = _Sub64(temp[0], P0, &temp[0]);
-            borrow = _Subc64(temp[1], P123, borrow, &temp[1]);
-            borrow = _Subc64(temp[2], P123, borrow, &temp[2]);
-            borrow = _Subc64(temp[3], P123, borrow, &temp[3]);
-            temp[4] -= borrow;
+            // Subtract p from temp using PTX borrow chain (single _Sub256 call)
+            uint64_t p[4] = {P0, P123, P123, P123};
+            uint64_t borrow64;
+            _Sub256(temp, p, temp, &borrow64);
+            temp[4] -= borrow64;
         } else {
             break;
         }
