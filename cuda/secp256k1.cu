@@ -219,6 +219,45 @@ __device__ uint32_t _Add256Plus128(uint64_t a[4], uint64_t b0, uint64_t b1, uint
 }
 
 /**
+ * Add 128-bit number to array in-place
+ * a[0..1] += (b0, b1)
+ * Returns carry-out (0 or 1)
+ *
+ * Uses PTX 32-bit carry chain for efficiency.
+ * Replaces _Add64 + _Add64x3 pattern (9 PTX instructions → 5 instructions).
+ */
+__device__ uint32_t _Add128(uint64_t a[2], uint64_t b0, uint64_t b1)
+{
+    uint32_t a0 = (uint32_t)a[0];
+    uint32_t a1 = (uint32_t)(a[0] >> 32);
+    uint32_t a2 = (uint32_t)a[1];
+    uint32_t a3 = (uint32_t)(a[1] >> 32);
+
+    uint32_t b0_lo = (uint32_t)b0;
+    uint32_t b0_hi = (uint32_t)(b0 >> 32);
+    uint32_t b1_lo = (uint32_t)b1;
+    uint32_t b1_hi = (uint32_t)(b1 >> 32);
+
+    uint32_t r0, r1, r2, r3, carry;
+
+    asm volatile (
+        "add.cc.u32   %0, %5, %9;\n\t"    // r0 = a0 + b0_lo
+        "addc.cc.u32  %1, %6, %10;\n\t"   // r1 = a1 + b0_hi + carry
+        "addc.cc.u32  %2, %7, %11;\n\t"   // r2 = a2 + b1_lo + carry
+        "addc.cc.u32  %3, %8, %12;\n\t"   // r3 = a3 + b1_hi + carry
+        "addc.u32     %4, 0, 0;\n\t"      // carry = 0 + 0 + carry
+        : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3), "=r"(carry)
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+          "r"(b0_lo), "r"(b0_hi), "r"(b1_lo), "r"(b1_hi)
+    );
+
+    a[0] = ((uint64_t)r1 << 32) | r0;
+    a[1] = ((uint64_t)r3 << 32) | r2;
+
+    return carry;
+}
+
+/**
  * Add two 64-bit numbers with carry-in (a + b + carry_in)
  * Returns carry-out (0 or 1)
  *
@@ -755,9 +794,8 @@ __device__ void _ModSquare(const uint64_t a[4], uint64_t result[4])
         uint64_t low, high;
         _Mult64(a[i], a[i], &low, &high);
 
-        // Add to temp[2*i] and temp[2*i+1] using PTX carry chain
-        uint32_t c1 = _Add64(temp[2 * i], low, &temp[2 * i]);
-        uint32_t c2 = _Add64x3(temp[2 * i + 1], high, c1, &temp[2 * i + 1]);
+        // Add to temp[2*i..2*i+1] using single PTX call (5 instructions)
+        uint32_t c2 = _Add128(&temp[2 * i], low, high);
 
         // Propagate carry to higher limbs
         if (2 * i + 2 < 8) {
