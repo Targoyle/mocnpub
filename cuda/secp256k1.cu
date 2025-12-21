@@ -554,66 +554,6 @@ __device__ void _ModMult(const uint64_t a[4], const uint64_t b[4], uint64_t resu
 }
 
 /**
- * Modular multiplication by Beta: (a * β) mod p
- * Uses compile-time #define constants for β (BETA0-BETA3)
- */
-__device__ void _ModMultByBeta(const uint64_t a[4], uint64_t result[4])
-{
-    const uint64_t beta[4] = {BETA0, BETA1, BETA2, BETA3};
-    uint64_t temp[8] = {0};
-
-    for (int i = 0; i < 4; i++) {
-        uint64_t carry = 0;
-        for (int j = 0; j < 4; j++) {
-            uint64_t low, high;
-            _Mult64(a[i], beta[j], &low, &high);
-
-            uint64_t s1 = temp[i + j] + low;
-            uint64_t carry1 = (s1 < temp[i + j]) ? 1 : 0;
-
-            uint64_t s2 = s1 + carry;
-            uint64_t carry2 = (s2 < s1) ? 1 : 0;
-
-            temp[i + j] = s2;
-            carry = high + carry1 + carry2;
-        }
-        temp[i + 4] += carry;
-    }
-
-    _Reduce512(temp, result);
-}
-
-/**
- * Modular multiplication by Beta²: (a * β²) mod p
- * Uses compile-time #define constants for β² (BETA2_0-BETA2_3)
- */
-__device__ void _ModMultByBeta2(const uint64_t a[4], uint64_t result[4])
-{
-    const uint64_t beta2[4] = {BETA2_0, BETA2_1, BETA2_2, BETA2_3};
-    uint64_t temp[8] = {0};
-
-    for (int i = 0; i < 4; i++) {
-        uint64_t carry = 0;
-        for (int j = 0; j < 4; j++) {
-            uint64_t low, high;
-            _Mult64(a[i], beta2[j], &low, &high);
-
-            uint64_t s1 = temp[i + j] + low;
-            uint64_t carry1 = (s1 < temp[i + j]) ? 1 : 0;
-
-            uint64_t s2 = s1 + carry;
-            uint64_t carry2 = (s2 < s1) ? 1 : 0;
-
-            temp[i + j] = s2;
-            carry = high + carry1 + carry2;
-        }
-        temp[i + 4] += carry;
-    }
-
-    _Reduce512(temp, result);
-}
-
-/**
  * Modular squaring: (a * a) mod p
  * Optimized version of _ModMult(a, a, result)
  *
@@ -934,69 +874,6 @@ __device__ void _PointAddMixed(
     // Z3 = Z1 * H (since Z2 = 1)
     _ModMult(Z1, H, Z3);                     // M8: Z3
     // Total: 8M + 3S (optimized by reusing X1*H^2)
-}
-
-/**
- * Mixed Point Addition with Generator G: (X1, Y1, Z1) + G
- *
- * Specialized version of _PointAddMixed that uses the generator point G
- * with compile-time #define constants (GX0-GX3, GY0-GY3).
- *
- * Cost: 8M + 3S (same as _PointAddMixed)
- */
-__device__ void _PointAddMixedG(
-    const uint64_t X1[4], const uint64_t Y1[4], const uint64_t Z1[4],
-    uint64_t X3[4], uint64_t Y3[4], uint64_t Z3[4]
-)
-{
-    // Generator point G as compile-time constants
-    const uint64_t Gx[4] = {GX0, GX1, GX2, GX3};
-    const uint64_t Gy[4] = {GY0, GY1, GY2, GY3};
-
-    uint64_t Z1_squared[4], Z1_cubed[4];
-    uint64_t U2[4], S2[4];
-    uint64_t H[4], H_squared[4], H_cubed[4];
-    uint64_t R[4], R_squared[4];
-    uint64_t X1_H2[4];
-    uint64_t temp[4], temp2[4];
-
-    // Z1^2 and Z1^3
-    _ModSquare(Z1, Z1_squared);
-    _ModMult(Z1_squared, Z1, Z1_cubed);
-
-    // U2 = Gx * Z1^2
-    _ModMult(Gx, Z1_squared, U2);
-
-    // S2 = Gy * Z1^3
-    _ModMult(Gy, Z1_cubed, S2);
-
-    // H = U2 - X1
-    _ModSub(U2, X1, H);
-
-    // R = S2 - Y1
-    _ModSub(S2, Y1, R);
-
-    // H^2 and H^3
-    _ModSquare(H, H_squared);
-    _ModMult(H_squared, H, H_cubed);
-
-    // R^2
-    _ModSquare(R, R_squared);
-
-    // X3 = R^2 - H^3 - 2*X1*H^2
-    _ModMult(X1, H_squared, X1_H2);
-    _ModAdd(X1_H2, X1_H2, temp);
-    _ModSub(R_squared, H_cubed, temp2);
-    _ModSub(temp2, temp, X3);
-
-    // Y3 = R * (X1*H^2 - X3) - Y1*H^3
-    _ModSub(X1_H2, X3, temp);
-    _ModMult(R, temp, temp2);
-    _ModMult(Y1, H_cubed, temp);
-    _ModSub(temp2, temp, Y3);
-
-    // Z3 = Z1 * H
-    _ModMult(Z1, H, Z3);
 }
 
 /**
@@ -1373,9 +1250,11 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
     }
 
     // Generate subsequent points using P = P + G
+    const uint64_t Gx[4] = {GX0, GX1, GX2, GX3};
+    const uint64_t Gy[4] = {GY0, GY1, GY2, GY3};
     for (uint32_t key_idx = 1; key_idx < n; key_idx++) {
         uint64_t tempX[4], tempY[4], tempZ[4];
-        _PointAddMixedG(Px, Py, Pz, tempX, tempY, tempZ);
+        _PointAddMixed(Px, Py, Pz, Gx, Gy, tempX, tempY, tempZ);
 
         for (int i = 0; i < 4; i++) {
             Px[i] = tempX[i];
@@ -1414,9 +1293,11 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
         _ModMult(X_arr[i], Z_inv_squared, x);
 
         // Endomorphism: compute β*x and β²*x
+        const uint64_t beta[4] = {BETA0, BETA1, BETA2, BETA3};
+        const uint64_t beta2[4] = {BETA2_0, BETA2_1, BETA2_2, BETA2_3};
         uint64_t x_beta[4], x_beta2[4];
-        _ModMultByBeta(x, x_beta);
-        _ModMultByBeta2(x, x_beta2);
+        _ModMult(x, beta, x_beta);
+        _ModMult(x, beta2, x_beta2);
 
         uint64_t* x_coords[3] = { x, x_beta, x_beta2 };
 
