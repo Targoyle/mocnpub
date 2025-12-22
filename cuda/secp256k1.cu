@@ -19,13 +19,6 @@
 #define P3 0xFFFFFFFFFFFFFFFFULL
 #define P123 0xFFFFFFFFFFFFFFFFULL  // P1 = P2 = P3 (max uint64, special form)
 
-// Multiples of p for branchless reduction (limb[0] only, limb[1-3] = P123, limb[4] = n)
-// np[0] = (n * p)[0] where n = 1, 2, 3, 4
-#define NP0_1 0xFFFFFFFEFFFFFC2FULL  // 1p[0]
-#define NP0_2 0xFFFFFFFDFFFFF85EULL  // 2p[0]
-#define NP0_3 0xFFFFFFFCFFFFF48DULL  // 3p[0]
-#define NP0_4 0xFFFFFFFBFFFFF0BCULL  // 4p[0]
-
 // Generator point G (x coordinate)
 // 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
 #define GX0 0x59F2815B16F81798ULL
@@ -172,68 +165,6 @@ __device__ uint32_t _Add320(const uint64_t a[5], const uint64_t b[5], uint64_t s
     sum[4] = ((uint64_t)r9 << 32) | r8;
 
     return carry;
-}
-
-/**
- * Subtract two 320-bit numbers (5 limbs each): result = a - b
- * Returns borrow-out (0 or 1)
- *
- * Uses PTX 32-bit borrow chain for efficiency.
- */
-__device__ uint32_t _Sub320(const uint64_t a[5], const uint64_t b[5], uint64_t result[5])
-{
-    uint32_t a0 = (uint32_t)a[0];
-    uint32_t a1 = (uint32_t)(a[0] >> 32);
-    uint32_t a2 = (uint32_t)a[1];
-    uint32_t a3 = (uint32_t)(a[1] >> 32);
-    uint32_t a4 = (uint32_t)a[2];
-    uint32_t a5 = (uint32_t)(a[2] >> 32);
-    uint32_t a6 = (uint32_t)a[3];
-    uint32_t a7 = (uint32_t)(a[3] >> 32);
-    uint32_t a8 = (uint32_t)a[4];
-    uint32_t a9 = (uint32_t)(a[4] >> 32);
-
-    uint32_t b0 = (uint32_t)b[0];
-    uint32_t b1 = (uint32_t)(b[0] >> 32);
-    uint32_t b2 = (uint32_t)b[1];
-    uint32_t b3 = (uint32_t)(b[1] >> 32);
-    uint32_t b4 = (uint32_t)b[2];
-    uint32_t b5 = (uint32_t)(b[2] >> 32);
-    uint32_t b6 = (uint32_t)b[3];
-    uint32_t b7 = (uint32_t)(b[3] >> 32);
-    uint32_t b8 = (uint32_t)b[4];
-    uint32_t b9 = (uint32_t)(b[4] >> 32);
-
-    uint32_t r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, borrow;
-
-    asm volatile (
-        "sub.cc.u32   %0, %11, %21;\n\t"   // r0 = a0 - b0
-        "subc.cc.u32  %1, %12, %22;\n\t"   // r1 = a1 - b1 - borrow
-        "subc.cc.u32  %2, %13, %23;\n\t"   // r2 = a2 - b2 - borrow
-        "subc.cc.u32  %3, %14, %24;\n\t"   // r3 = a3 - b3 - borrow
-        "subc.cc.u32  %4, %15, %25;\n\t"   // r4 = a4 - b4 - borrow
-        "subc.cc.u32  %5, %16, %26;\n\t"   // r5 = a5 - b5 - borrow
-        "subc.cc.u32  %6, %17, %27;\n\t"   // r6 = a6 - b6 - borrow
-        "subc.cc.u32  %7, %18, %28;\n\t"   // r7 = a7 - b7 - borrow
-        "subc.cc.u32  %8, %19, %29;\n\t"   // r8 = a8 - b8 - borrow
-        "subc.cc.u32  %9, %20, %30;\n\t"   // r9 = a9 - b9 - borrow
-        "subc.u32     %10, 0, 0;\n\t"      // borrow = 0 - 0 - borrow
-        : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3), "=r"(r4),
-          "=r"(r5), "=r"(r6), "=r"(r7), "=r"(r8), "=r"(r9), "=r"(borrow)
-        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(a4),
-          "r"(a5), "r"(a6), "r"(a7), "r"(a8), "r"(a9),
-          "r"(b0), "r"(b1), "r"(b2), "r"(b3), "r"(b4),
-          "r"(b5), "r"(b6), "r"(b7), "r"(b8), "r"(b9)
-    );
-
-    result[0] = ((uint64_t)r1 << 32) | r0;
-    result[1] = ((uint64_t)r3 << 32) | r2;
-    result[2] = ((uint64_t)r5 << 32) | r4;
-    result[3] = ((uint64_t)r7 << 32) | r6;
-    result[4] = ((uint64_t)r9 << 32) | r8;
-
-    // subc.u32 0, 0 with borrow gives 0xFFFFFFFF if borrow, 0 otherwise
-    return borrow & 1;  // Convert 0xFFFFFFFF to 1
 }
 
 /**
@@ -906,32 +837,43 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
     // Add: temp + sum (using PTX carry chain, 11 instructions)
     _Add320(temp, sum, temp);
 
-    // Branchless reduction: subtract (temp[4] + 1) * p, if borrow add p back
-    // This replaces the loop with a single subtract + conditional add
-    //
-    // np = (temp[4] + 1) * p, where:
-    //   np[0] = np0_table[temp[4]]
-    //   np[1..3] = P123 (all max_uint64)
-    //   np[4] = temp[4]
-    const uint64_t np0_table[4] = {NP0_1, NP0_2, NP0_3, NP0_4};
-    uint64_t idx = temp[4];  // 0, 1, 2, or 3
-    uint64_t np[5] = {np0_table[idx], P123, P123, P123, idx};
+    // Now reduce: while temp >= p, subtract p
+    // At most 2-3 iterations needed
+    // Using #define constants for P (P1=P2=P3=P123=max_uint64)
+    for (int iter = 0; iter < 3; iter++) {
+        // Check if temp >= p
+        // Since P1=P2=P3=P123=max_uint64, comparison is simplified:
+        // - If any of temp[3,2,1] < max_uint64, then temp < p
+        // - Otherwise check temp[0] >= P0
+        bool ge = false;
+        if (temp[4] > 0) {
+            ge = true;
+        } else if (temp[3] < P123) {
+            ge = false;
+        } else if (temp[2] < P123) {
+            ge = false;
+        } else if (temp[1] < P123) {
+            ge = false;
+        } else {
+            // temp[3]=temp[2]=temp[1]=P123 (max_uint64), check temp[0] vs P0
+            ge = temp[0] >= P0;
+        }
 
-    // Subtract (temp[4] + 1) * p
-    uint64_t diff[5];
-    uint32_t borrow = _Sub320(temp, np, diff);
+        if (ge) {
+            // Subtract p from temp using PTX borrow chain (single _Sub256 call)
+            uint64_t p[4] = {P0, P123, P123, P123};
+            uint64_t borrow64;
+            _Sub256(temp, p, temp, &borrow64);
+            temp[4] -= borrow64;
+        } else {
+            break;
+        }
+    }
 
-    // If borrow, add p back (branchless using mask)
-    // mask = borrow ? 0xFFFFFFFFFFFFFFFF : 0
-    uint64_t mask = -(uint64_t)borrow;
-    uint64_t p_masked[5] = {P0 & mask, P123 & mask, P123 & mask, P123 & mask, 0};
-    _Add320(diff, p_masked, diff);
-
-    // Copy result (diff is now in [0, p))
-    result[0] = diff[0];
-    result[1] = diff[1];
-    result[2] = diff[2];
-    result[3] = diff[3];
+    // Copy result
+    for (int i = 0; i < 4; i++) {
+        result[i] = temp[i];
+    }
 }
 
 /**
