@@ -265,11 +265,12 @@
 | GPU + _Add256Plus128 で _ReduceOverflow 最適化 | 5.287B keys/sec | 75,529x |
 | GPU + _Add128/_Add512 で _ModSquare 最適化 | 5.383B keys/sec | 76,903x |
 | GPU + _Add128To/_PropagateCarry256 リファクタ | 5.395B keys/sec | 77,071x |
-| **GPU + ループ融合（Montgomery's Trick 累積積）** | **5.499B keys/sec** | **78,557x** 🔥 |
+| GPU + ループ融合（Montgomery's Trick 累積積） | 5.499B keys/sec | 78,557x |
+| **GPU + _ReduceOverflow インライン化（分岐削除）** | **5.590B keys/sec** | **79,857x** 🔥 |
 
 **8文字 prefix が約 4 分で見つかる！** 🎉
 
-**32 prefix 時：5.117B keys/sec** 💪
+**32 prefix 時：5.246B keys/sec** 💪
 
 ---
 
@@ -309,6 +310,7 @@
 | **_Add128/_Add512 で _ModSquare 最適化** | **+1.8%**（_Add128: 9→5 命令、_Add512: 48→16 命令、32 prefix も 5B 突破！） 🔥🔥🔥 | ✅ 完了 |
 | **_Add128To/_PropagateCarry256 リファクタ** | **+0.2%**（carry 処理を専用関数に、コード可読性向上） 🔥 | ✅ 完了 |
 | **ループ融合（Montgomery's Trick 累積積）** | **+1.9%**（Phase 1 と Phase 2 を統合、メモリアクセス局所性向上、PM Sampling の山がなだらかに） 🔥🔥🔥 | ✅ 完了 |
+| **_ReduceOverflow インライン化** | **+1.7%**（関数呼び出し削除、if 分岐削除、sum[4]==0 は稀なので常に実行） 🔥🔥🔥 | ✅ 完了 |
 
 #### エンドモルフィズムの仕組み
 

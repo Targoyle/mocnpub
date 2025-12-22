@@ -79,11 +79,12 @@
 | GPU + _Add256Plus128 で _ReduceOverflow 最適化 | 5.287B keys/sec | 75,529x |
 | GPU + _Add128/_Add512 で _ModSquare 最適化 | 5.383B keys/sec | 76,903x |
 | GPU + _Add128To/_PropagateCarry256 リファクタ | 5.395B keys/sec | 77,071x |
-| **GPU + ループ融合（Montgomery's Trick 累積積）** | **5.499B keys/sec** | **78,557x** 🔥 |
+| GPU + ループ融合（Montgomery's Trick 累積積） | 5.499B keys/sec | 78,557x |
+| **GPU + _ReduceOverflow インライン化（分岐削除）** | **5.590B keys/sec** | **79,857x** 🔥 |
 
 **8文字 prefix が約 4 分で見つかる！** 🎉
 **CPU 使用率が 100% → 1% に削減！電力消費大幅削減！** 💡
-**32 prefix 時：5.117B keys/sec** 💪
+**32 prefix 時：5.246B keys/sec** 💪
 
 ---
 
