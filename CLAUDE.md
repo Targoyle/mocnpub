@@ -266,11 +266,12 @@
 | GPU + _Add128/_Add512 で _ModSquare 最適化 | 5.383B keys/sec | 76,903x |
 | GPU + _Add128To/_PropagateCarry256 リファクタ | 5.395B keys/sec | 77,071x |
 | GPU + ループ融合（Montgomery's Trick 累積積） | 5.499B keys/sec | 78,557x |
-| **GPU + _ReduceOverflow インライン化（分岐削除）** | **5.590B keys/sec** | **79,857x** 🔥 |
+| GPU + _ReduceOverflow インライン化（分岐削除） | 5.590B keys/sec | 79,857x |
+| **GPU + _Reduce512 while ループ簡素化** | **5.707B keys/sec** | **81,529x** 🔥 |
 
 **8文字 prefix が約 4 分で見つかる！** 🎉
 
-**32 prefix 時：5.246B keys/sec** 💪
+**32 prefix 時：5.386B keys/sec** 💪
 
 ---
 
@@ -311,6 +312,7 @@
 | **_Add128To/_PropagateCarry256 リファクタ** | **+0.2%**（carry 処理を専用関数に、コード可読性向上） 🔥 | ✅ 完了 |
 | **ループ融合（Montgomery's Trick 累積積）** | **+1.9%**（Phase 1 と Phase 2 を統合、メモリアクセス局所性向上、PM Sampling の山がなだらかに） 🔥🔥🔥 | ✅ 完了 |
 | **_ReduceOverflow インライン化** | **+1.7%**（関数呼び出し削除、if 分岐削除、sum[4]==0 は稀なので常に実行） 🔥🔥🔥 | ✅ 完了 |
+| **_Reduce512 while ループ簡素化** | **+2.1%**（for + 複数 if-else → while 1条件、branch divergence #1 を攻略） 🔥🔥🔥 | ✅ 完了 |
 
 #### エンドモルフィズムの仕組み
 
