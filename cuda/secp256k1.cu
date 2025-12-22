@@ -746,36 +746,6 @@ __device__ void _Mult64(uint64_t a, uint64_t b, uint64_t* low, uint64_t* high)
 }
 
 /**
- * Reduce the 5th limb of a 320-bit number: sum[4] * 2^256 mod p = sum[4] * (2^32 + 977)
- * Adds the result back to sum[0..4], avoiding billions of iterations in a naive reduction loop.
- *
- * Uses PTX carry chain for efficient carry propagation.
- */
-__device__ void _ReduceOverflow(uint64_t sum[5])
-{
-    if (sum[4] == 0) return;
-
-    uint64_t factor = sum[4];
-
-    // factor * 2^32: shift left by 32 bits
-    uint64_t shifted_low = factor << 32;
-    uint64_t shifted_high = factor >> 32;
-
-    // factor * 977
-    uint64_t mult_low, mult_high;
-    _Mult64(factor, 977, &mult_low, &mult_high);
-
-    // Compute (shifted + mult) = factor * (2^32 + 977)
-    // Result is at most 97-bit (64-bit factor * 33-bit constant)
-    uint64_t add[2];
-    uint32_t c = _Add128To(shifted_low, shifted_high, mult_low, mult_high, add);
-    // c is carry from add[1] (0 or 1, represents bit 128)
-
-    // Add (add[0], add[1], c, 0) to sum[0..3] using single PTX call (9 instructions)
-    sum[4] = _Add256Plus128(sum, add[0], add[1], c);
-}
-
-/**
  * Reduce a 512-bit number modulo p
  * Uses secp256k1-specific reduction: p = 2^256 - 2^32 - 977
  *
@@ -824,7 +794,17 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
     _Add320(shifted, mult977, sum);
 
     // Reduce sum[4]: sum[4] * 2^256 mod p = sum[4] * (2^32 + 977)
-    _ReduceOverflow(sum);
+    // Inlined: sum[4] == 0 is rare after 8-limb to 5-limb conversion
+    {
+        uint64_t factor = sum[4];
+        uint64_t shifted_low = factor << 32;
+        uint64_t shifted_high = factor >> 32;
+        uint64_t mult_low, mult_high;
+        _Mult64(factor, 977, &mult_low, &mult_high);
+        uint64_t add[2];
+        uint32_t c = _Add128To(shifted_low, shifted_high, mult_low, mult_high, add);
+        sum[4] = _Add256Plus128(sum, add[0], add[1], c);
+    }
 
     // Add to low
     uint64_t temp[5];
