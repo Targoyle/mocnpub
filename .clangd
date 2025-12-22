@@ -1,0 +1,11 @@
+# clangd configuration for CUDA
+# See: https://clangd.llvm.org/config
+
+CompileFlags:
+  Add:
+    - "-xcuda"
+    - "--cuda-path=/usr/local/cuda"
+    - "--cuda-gpu-arch=sm_89"
+    - "-I/usr/local/cuda/include"
+    - "-D__CUDACC__"
+    - "-D__CUDA_ARCH__=890"
