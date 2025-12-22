@@ -1600,6 +1600,9 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
                 // This halves the loop iterations for multiple prefixes
                 uint64_t x_doubled = ((uint64_t)x_upper32 << 32) | x_upper32;
 
+                // Branchless matching: accumulate match results with OR
+                // Match probability is ~2^-32, so the loop almost always runs fully.
+                // Removing if+break eliminates branch instructions entirely.
                 uint32_t pair_count = _num_prefixes / 2;
                 for (uint32_t p = 0; p < pair_count; p++) {
                     uint32_t idx = p * 2;
@@ -1610,18 +1613,13 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
                     // XOR and mask: if lower 32 bits are 0, patterns[idx] matches
                     //               if upper 32 bits are 0, patterns[idx+1] matches
                     uint64_t diff = (x_doubled ^ combined_pattern) & combined_mask;
-                    if ((diff & 0xFFFFFFFFULL) == 0 || (diff >> 32) == 0) {
-                        matched = true;
-                        break;
-                    }
+                    matched |= ((diff & 0xFFFFFFFFULL) == 0) | ((diff >> 32) == 0);
                 }
 
                 // Handle odd number of prefixes: check the last one separately
-                if (!matched && (_num_prefixes & 1)) {
+                if (_num_prefixes & 1) {
                     uint32_t p = _num_prefixes - 1;
-                    if ((x_upper32 & _masks[p]) == _patterns[p]) {
-                        matched = true;
-                    }
+                    matched |= ((x_upper32 & _masks[p]) == _patterns[p]);
                 }
             }
 
