@@ -965,32 +965,37 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
     _ModMult(t, x2, x11);       // a^2047
 
     // x22 = a^(2^22 - 1)
-    for (int i = 0; i < 11; i++) {
-        _ModSquare(i == 0 ? x11 : t, t);
+    _ModSquare(x11, t);
+    for (int i = 1; i < 11; i++) {
+        _ModSquare(t, t);
     }
     _ModMult(t, x11, x22);
 
     // x44 = a^(2^44 - 1)
-    for (int i = 0; i < 22; i++) {
-        _ModSquare(i == 0 ? x22 : t, t);
+    _ModSquare(x22, t);
+    for (int i = 1; i < 22; i++) {
+        _ModSquare(t, t);
     }
     _ModMult(t, x22, x44);
 
     // x88 = a^(2^88 - 1)
-    for (int i = 0; i < 44; i++) {
-        _ModSquare(i == 0 ? x44 : t, t);
+    _ModSquare(x44, t);
+    for (int i = 1; i < 44; i++) {
+        _ModSquare(t, t);
     }
     _ModMult(t, x44, x88);
 
     // x176 = a^(2^176 - 1)
-    for (int i = 0; i < 88; i++) {
-        _ModSquare(i == 0 ? x88 : t, t);
+    _ModSquare(x88, t);
+    for (int i = 1; i < 88; i++) {
+        _ModSquare(t, t);
     }
     _ModMult(t, x88, x176);
 
     // x220 = a^(2^220 - 1)
-    for (int i = 0; i < 44; i++) {
-        _ModSquare(i == 0 ? x176 : t, t);
+    _ModSquare(x176, t);
+    for (int i = 1; i < 44; i++) {
+        _ModSquare(t, t);
     }
     _ModMult(t, x44, x220);
 
@@ -1005,8 +1010,9 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
     //     = (2^223 - 1) * 2^23 + (2^22 - 1) * 2^(23-22) + ...
 
     // t = x223 * 2^23
-    for (int i = 0; i < 23; i++) {
-        _ModSquare(i == 0 ? x223 : t, t);
+    _ModSquare(x223, t);
+    for (int i = 1; i < 23; i++) {
+        _ModSquare(t, t);
     }
     _ModMult(t, x22, t);        // + x22
 
