@@ -1566,8 +1566,15 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
     }
 
     // Generate subsequent points using P = P + G
+    // Also compute cumulative products c[i] for Montgomery's Trick (loop fusion)
     const uint64_t Gx[4] = {GX0, GX1, GX2, GX3};
     const uint64_t Gy[4] = {GY0, GY1, GY2, GY3};
+
+    // Initialize c[0] = Z_arr[0]
+    for (int i = 0; i < 4; i++) {
+        c[0][i] = Z_arr[0][i];
+    }
+
     for (uint32_t key_idx = 1; key_idx < n; key_idx++) {
         uint64_t tempX[4], tempY[4], tempZ[4];
         _PointAddMixed(Px, Py, Pz, Gx, Gy, tempX, tempY, tempZ);
@@ -1579,16 +1586,13 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
             X_arr[key_idx][i] = Px[i];
             Z_arr[key_idx][i] = Pz[i];
         }
+
+        // Loop fusion: compute c[key_idx] = c[key_idx-1] * Z_arr[key_idx]
+        _ModMult(c[key_idx-1], Z_arr[key_idx], c[key_idx]);
     }
 
     // === Phase 2: Montgomery's Trick for batch inverse ===
-
-    for (int i = 0; i < 4; i++) {
-        c[0][i] = Z_arr[0][i];
-    }
-    for (uint32_t i = 1; i < n; i++) {
-        _ModMult(c[i-1], Z_arr[i], c[i]);
-    }
+    // (cumulative products c[i] already computed above)
 
     uint64_t u[4];
     _ModInv(c[n-1], u);
