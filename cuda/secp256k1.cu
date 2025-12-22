@@ -663,8 +663,7 @@ __device__ void _Sub256(const uint64_t a[4], const uint64_t b[4], uint64_t resul
     result[2] = ((uint64_t)r5 << 32) | r4;
     result[3] = ((uint64_t)r7 << 32) | r6;
     // subc.u32 0, 0 with borrow gives 0xFFFFFFFF if borrow, 0 otherwise
-    // Return raw borrow (0 or 0xFFFFFFFF) for efficient mask creation
-    *borrow_out = borrow;
+    *borrow_out = borrow & 1;  // Convert 0xFFFFFFFF to 1
 }
 
 /**
@@ -700,8 +699,8 @@ __device__ void _ModAdd(const uint64_t a[4], const uint64_t b[4], uint64_t resul
     _Sub256(sum, p, diff, &borrow);
 
     // Use diff if: carry || !borrow (i.e., sum >= p or overflow)
-    // borrow is 0 or 0xFFFFFFFF, so !borrow gives 1 or 0
-    uint64_t use_diff = carry | !borrow;
+    // use_diff = carry | (1 - borrow)
+    uint64_t use_diff = carry | (1 - borrow);
     uint64_t mask = -use_diff;  // use_diff ? 0xFFFF... : 0
 
     // result = (diff & mask) | (sum & ~mask)
@@ -722,8 +721,8 @@ __device__ void _ModSub(const uint64_t a[4], const uint64_t b[4], uint64_t resul
     _Sub256(a, b, diff, &borrow);
 
     // If borrow, add p back (branchless)
-    // borrow is 0 or 0xFFFFFFFF, sign-extend to 64-bit mask
-    uint64_t mask = (int64_t)(int32_t)borrow;
+    // mask = borrow ? 0xFFFFFFFFFFFFFFFF : 0
+    uint64_t mask = -borrow;
 
     // diff + (p & mask) - unrolled with #define constants
     uint64_t p_masked[4];
@@ -865,7 +864,7 @@ __device__ void _Reduce512(const uint64_t in[8], uint64_t result[4])
             uint64_t p[4] = {P0, P123, P123, P123};
             uint64_t borrow64;
             _Sub256(temp, p, temp, &borrow64);
-            temp[4] -= !!borrow64;  // borrow64 is 0 or 0xFFFFFFFF, convert to 0 or 1
+            temp[4] -= borrow64;
         } else {
             break;
         }
