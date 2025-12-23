@@ -457,8 +457,19 @@ impl SequentialTripleBufferMiner {
         let masks_64: Vec<u64> = prefix_bits.iter().map(|(_, m, _)| *m).collect();
 
         // Convert to 32-bit for GPU (extract upper 32 bits)
-        let patterns_32: Vec<u32> = patterns_64.iter().map(|p| (*p >> 32) as u32).collect();
-        let masks_32: Vec<u32> = masks_64.iter().map(|m| (*m >> 32) as u32).collect();
+        let mut patterns_32: Vec<u32> = patterns_64.iter().map(|p| (*p >> 32) as u32).collect();
+        let mut masks_32: Vec<u32> = masks_64.iter().map(|m| (*m >> 32) as u32).collect();
+
+        // Pad to even count by duplicating last prefix (avoids branch in CUDA kernel)
+        // Duplicating is safe: matching the same prefix twice just sets matched=true twice
+        // Note: Only pad when num_prefixes > 1 (single prefix uses optimized path, no loop)
+        let num_prefixes_gpu = if num_prefixes > 1 && num_prefixes % 2 == 1 {
+            patterns_32.push(patterns_32[num_prefixes - 1]);
+            masks_32.push(masks_32[num_prefixes - 1]);
+            num_prefixes + 1
+        } else {
+            num_prefixes
+        };
 
         // Upload patterns/masks to constant memory
         // Using get_global() to access __constant__ variables in CUDA
@@ -478,7 +489,7 @@ impl SequentialTripleBufferMiner {
             .flat_map(|x| x.to_ne_bytes())
             .collect();
         let masks_bytes: Vec<u8> = masks_padded.iter().flat_map(|x| x.to_ne_bytes()).collect();
-        let num_prefixes_bytes = (num_prefixes as u32).to_ne_bytes();
+        let num_prefixes_bytes = (num_prefixes_gpu as u32).to_ne_bytes();
 
         stream_0.memcpy_htod(&patterns_bytes, &mut patterns_const)?;
         stream_0.memcpy_htod(&masks_bytes, &mut masks_const)?;
@@ -709,8 +720,19 @@ pub fn generate_pubkeys_sequential(
     let masks_64: Vec<u64> = prefix_bits.iter().map(|(_, m, _)| *m).collect();
 
     // Convert to 32-bit for GPU (extract upper 32 bits)
-    let patterns_32: Vec<u32> = patterns_64.iter().map(|p| (*p >> 32) as u32).collect();
-    let masks_32: Vec<u32> = masks_64.iter().map(|m| (*m >> 32) as u32).collect();
+    let mut patterns_32: Vec<u32> = patterns_64.iter().map(|p| (*p >> 32) as u32).collect();
+    let mut masks_32: Vec<u32> = masks_64.iter().map(|m| (*m >> 32) as u32).collect();
+
+    // Pad to even count by duplicating last prefix (avoids branch in CUDA kernel)
+    // Duplicating is safe: matching the same prefix twice just sets matched=true twice
+    // Note: Only pad when num_prefixes > 1 (single prefix uses optimized path, no loop)
+    let num_prefixes_gpu = if num_prefixes > 1 && num_prefixes % 2 == 1 {
+        patterns_32.push(patterns_32[num_prefixes - 1]);
+        masks_32.push(masks_32[num_prefixes - 1]);
+        num_prefixes + 1
+    } else {
+        num_prefixes
+    };
 
     // Allocate device memory for inputs
     let mut base_key_dev = stream.alloc_zeros::<u64>(4)?;
@@ -750,7 +772,7 @@ pub fn generate_pubkeys_sequential(
         .flat_map(|x| x.to_ne_bytes())
         .collect();
     let masks_bytes: Vec<u8> = masks_padded.iter().flat_map(|x| x.to_ne_bytes()).collect();
-    let num_prefixes_bytes = (num_prefixes as u32).to_ne_bytes();
+    let num_prefixes_bytes = (num_prefixes_gpu as u32).to_ne_bytes();
 
     stream.memcpy_htod(&patterns_bytes, &mut patterns_const)?;
     stream.memcpy_htod(&masks_bytes, &mut masks_const)?;

@@ -1416,6 +1416,7 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
                 // Branchless matching: accumulate match results with OR
                 // Match probability is ~2^-32, so the loop almost always runs fully.
                 // Removing if+break eliminates branch instructions entirely.
+                // Note: _num_prefixes is always even (Rust pads odd count by duplicating last prefix)
                 uint32_t pair_count = _num_prefixes / 2;
                 for (uint32_t p = 0; p < pair_count; p++) {
                     uint32_t idx = p * 2;
@@ -1427,12 +1428,6 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
                     //               if upper 32 bits are 0, patterns[idx+1] matches
                     uint64_t diff = (x_doubled ^ combined_pattern) & combined_mask;
                     matched |= ((diff & 0xFFFFFFFFULL) == 0) | ((diff >> 32) == 0);
-                }
-
-                // Handle odd number of prefixes: check the last one separately
-                if (_num_prefixes & 1) {
-                    uint32_t p = _num_prefixes - 1;
-                    matched |= ((x_upper32 & _masks[p]) == _patterns[p]);
                 }
             }
 
