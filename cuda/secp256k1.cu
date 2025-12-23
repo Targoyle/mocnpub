@@ -1496,11 +1496,15 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= _num_threads) return;
 
-    // Local arrays for storing intermediate Jacobian coordinates
+    // Local arrays for storing intermediate Jacobian coordinates (SoA layout)
     // Note: Y_arr is not needed! Prefix matching only uses x-coordinate (BIP-340)
-    uint64_t X_arr[MAX_KEYS_PER_THREAD][4];
-    uint64_t Z_arr[MAX_KEYS_PER_THREAD][4];
-    uint64_t c[MAX_KEYS_PER_THREAD][4];
+    // SoA (Structure of Arrays) for better cache locality when iterating by key_idx
+    uint64_t X_arr_0[MAX_KEYS_PER_THREAD], X_arr_1[MAX_KEYS_PER_THREAD];
+    uint64_t X_arr_2[MAX_KEYS_PER_THREAD], X_arr_3[MAX_KEYS_PER_THREAD];
+    uint64_t Z_arr_0[MAX_KEYS_PER_THREAD], Z_arr_1[MAX_KEYS_PER_THREAD];
+    uint64_t Z_arr_2[MAX_KEYS_PER_THREAD], Z_arr_3[MAX_KEYS_PER_THREAD];
+    uint64_t c_0[MAX_KEYS_PER_THREAD], c_1[MAX_KEYS_PER_THREAD];
+    uint64_t c_2[MAX_KEYS_PER_THREAD], c_3[MAX_KEYS_PER_THREAD];
 
     const uint32_t n = MAX_KEYS_PER_THREAD;
 
@@ -1525,10 +1529,8 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
     uint64_t Px[4], Py[4], Pz[4];
     _PointMultByIndex(idx, base_pubkey_x, base_pubkey_y, Px, Py, Pz);
 
-    for (int i = 0; i < 4; i++) {
-        X_arr[0][i] = Px[i];
-        Z_arr[0][i] = Pz[i];
-    }
+    X_arr_0[0] = Px[0]; X_arr_1[0] = Px[1]; X_arr_2[0] = Px[2]; X_arr_3[0] = Px[3];
+    Z_arr_0[0] = Pz[0]; Z_arr_1[0] = Pz[1]; Z_arr_2[0] = Pz[2]; Z_arr_3[0] = Pz[3];
 
     // Generate subsequent points using P = P + G
     // Also compute cumulative products c[i] for Montgomery's Trick (loop fusion)
@@ -1536,9 +1538,7 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
     const uint64_t Gy[4] = {GY0, GY1, GY2, GY3};
 
     // Initialize c[0] = Z_arr[0]
-    for (int i = 0; i < 4; i++) {
-        c[0][i] = Z_arr[0][i];
-    }
+    c_0[0] = Z_arr_0[0]; c_1[0] = Z_arr_1[0]; c_2[0] = Z_arr_2[0]; c_3[0] = Z_arr_3[0];
 
     for (uint32_t key_idx = 1; key_idx < n; key_idx++) {
         uint64_t tempX[4], tempY[4], tempZ[4];
@@ -1548,25 +1548,36 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
             Px[i] = tempX[i];
             Py[i] = tempY[i];
             Pz[i] = tempZ[i];
-            X_arr[key_idx][i] = Px[i];
-            Z_arr[key_idx][i] = Pz[i];
         }
+        X_arr_0[key_idx] = Px[0]; X_arr_1[key_idx] = Px[1];
+        X_arr_2[key_idx] = Px[2]; X_arr_3[key_idx] = Px[3];
+        Z_arr_0[key_idx] = Pz[0]; Z_arr_1[key_idx] = Pz[1];
+        Z_arr_2[key_idx] = Pz[2]; Z_arr_3[key_idx] = Pz[3];
 
         // Loop fusion: compute c[key_idx] = c[key_idx-1] * Z_arr[key_idx]
-        _ModMult(c[key_idx-1], Z_arr[key_idx], c[key_idx]);
+        uint64_t c_prev[4] = {c_0[key_idx-1], c_1[key_idx-1], c_2[key_idx-1], c_3[key_idx-1]};
+        uint64_t Z_cur[4] = {Z_arr_0[key_idx], Z_arr_1[key_idx], Z_arr_2[key_idx], Z_arr_3[key_idx]};
+        uint64_t c_result[4];
+        _ModMult(c_prev, Z_cur, c_result);
+        c_0[key_idx] = c_result[0]; c_1[key_idx] = c_result[1];
+        c_2[key_idx] = c_result[2]; c_3[key_idx] = c_result[3];
     }
 
     // === Phase 2: Montgomery's Trick for batch inverse ===
     // (cumulative products c[i] already computed above)
 
     uint64_t u[4];
-    _ModInv(c[n-1], u);
+    {
+        uint64_t c_last[4] = {c_0[n-1], c_1[n-1], c_2[n-1], c_3[n-1]};
+        _ModInv(c_last, u);
+    }
 
     // === Phase 3: Compute individual inverses and check prefix match ===
     for (int32_t i = n - 1; i >= 0; i--) {
         uint64_t Z_inv[4];
         if (i > 0) {
-            _ModMult(u, c[i-1], Z_inv);
+            uint64_t c_prev[4] = {c_0[i-1], c_1[i-1], c_2[i-1], c_3[i-1]};
+            _ModMult(u, c_prev, Z_inv);
         } else {
             for (int j = 0; j < 4; j++) Z_inv[j] = u[j];
         }
@@ -1575,7 +1586,8 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
         _ModSquare(Z_inv, Z_inv_squared);
 
         uint64_t x[4];
-        _ModMult(X_arr[i], Z_inv_squared, x);
+        uint64_t X_cur[4] = {X_arr_0[i], X_arr_1[i], X_arr_2[i], X_arr_3[i]};
+        _ModMult(X_cur, Z_inv_squared, x);
 
         // Endomorphism: compute β*x and β²*x
         const uint64_t beta[4] = {BETA0, BETA1, BETA2, BETA3};
@@ -1647,8 +1659,9 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
 
         // Update u for next iteration
         if (i > 0) {
+            uint64_t Z_cur[4] = {Z_arr_0[i], Z_arr_1[i], Z_arr_2[i], Z_arr_3[i]};
             uint64_t temp[4];
-            _ModMult(u, Z_arr[i], temp);
+            _ModMult(u, Z_cur, temp);
             for (int j = 0; j < 4; j++) {
                 u[j] = temp[j];
             }
