@@ -411,37 +411,6 @@ __device__ void _Add512(uint64_t a[8], const uint64_t b[8])
 }
 
 /**
- * Add two 64-bit numbers with carry-in (a + b + carry_in)
- * Returns carry-out (0 or 1)
- *
- * Uses PTX 32-bit carry chain for efficiency.
- */
-__device__ uint32_t _Addc64(uint64_t a, uint64_t b, uint32_t carry_in, uint64_t* sum)
-{
-    uint32_t a0 = (uint32_t)a;
-    uint32_t a1 = (uint32_t)(a >> 32);
-    uint32_t b0 = (uint32_t)b;
-    uint32_t b1 = (uint32_t)(b >> 32);
-    uint32_t r0, r1, carry_out;
-
-    asm volatile (
-        // First: a + b
-        "add.cc.u32  %0, %3, %5;\n\t"   // r0 = a0 + b0
-        "addc.cc.u32 %1, %4, %6;\n\t"   // r1 = a1 + b1 + carry
-        "addc.u32    %2, 0, 0;\n\t"     // carry_out = carry (from a + b)
-        // Second: + carry_in
-        "add.cc.u32  %0, %0, %7;\n\t"   // r0 = r0 + carry_in
-        "addc.cc.u32 %1, %1, 0;\n\t"    // r1 = r1 + carry
-        "addc.u32    %2, %2, 0;\n\t"    // carry_out = carry_out + carry
-        : "=r"(r0), "=r"(r1), "=r"(carry_out)
-        : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "r"(carry_in)
-    );
-
-    *sum = ((uint64_t)r1 << 32) | r0;
-    return carry_out;
-}
-
-/**
  * Add three 64-bit numbers (a + b + c)
  * Returns carry-out (0, 1, or 2)
  *
@@ -478,63 +447,6 @@ __device__ uint32_t _Add64x3(uint64_t a, uint64_t b, uint64_t c, uint64_t* sum)
 
     *sum = ((uint64_t)s1 << 32) | s0;
     return carry_out;  // 0, 1, or 2
-}
-
-/**
- * Subtract two 64-bit numbers (a - b)
- * Returns borrow-out (0 or 1)
- *
- * Uses PTX 32-bit borrow chain for efficiency.
- */
-__device__ uint32_t _Sub64(uint64_t a, uint64_t b, uint64_t* diff)
-{
-    uint32_t a0 = (uint32_t)a;
-    uint32_t a1 = (uint32_t)(a >> 32);
-    uint32_t b0 = (uint32_t)b;
-    uint32_t b1 = (uint32_t)(b >> 32);
-    uint32_t r0, r1, borrow;
-
-    asm volatile (
-        "sub.cc.u32  %0, %3, %5;\n\t"   // r0 = a0 - b0, borrow out
-        "subc.cc.u32 %1, %4, %6;\n\t"   // r1 = a1 - b1 - borrow, borrow out
-        "subc.u32    %2, 0, 0;\n\t"     // borrow = 0 - 0 - borrow = -borrow (0 or 0xFFFFFFFF)
-        : "=r"(r0), "=r"(r1), "=r"(borrow)
-        : "r"(a0), "r"(a1), "r"(b0), "r"(b1)
-    );
-
-    *diff = ((uint64_t)r1 << 32) | r0;
-    return borrow & 1;  // Convert 0xFFFFFFFF to 1
-}
-
-/**
- * Subtract two 64-bit numbers with borrow-in (a - b - borrow_in)
- * Returns borrow-out (0 or 1)
- *
- * Uses PTX 32-bit borrow chain for efficiency.
- */
-__device__ uint32_t _Subc64(uint64_t a, uint64_t b, uint32_t borrow_in, uint64_t* diff)
-{
-    uint32_t a0 = (uint32_t)a;
-    uint32_t a1 = (uint32_t)(a >> 32);
-    uint32_t b0 = (uint32_t)b;
-    uint32_t b1 = (uint32_t)(b >> 32);
-    uint32_t r0, r1, borrow_out;
-
-    asm volatile (
-        // First: a - b
-        "sub.cc.u32  %0, %3, %5;\n\t"   // r0 = a0 - b0
-        "subc.cc.u32 %1, %4, %6;\n\t"   // r1 = a1 - b1 - borrow
-        "subc.u32    %2, 0, 0;\n\t"     // borrow_out = -borrow (from a - b)
-        // Second: - borrow_in
-        "sub.cc.u32  %0, %0, %7;\n\t"   // r0 = r0 - borrow_in
-        "subc.cc.u32 %1, %1, 0;\n\t"    // r1 = r1 - borrow
-        "subc.u32    %2, %2, 0;\n\t"    // borrow_out = borrow_out - borrow
-        : "=r"(r0), "=r"(r1), "=r"(borrow_out)
-        : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "r"(borrow_in)
-    );
-
-    *diff = ((uint64_t)r1 << 32) | r0;
-    return borrow_out & 1;  // Convert to 0 or 1
 }
 
 // ============================================================================
@@ -664,19 +576,6 @@ __device__ void _Sub256(const uint64_t a[4], const uint64_t b[4], uint64_t resul
     result[3] = ((uint64_t)r7 << 32) | r6;
     // subc.u32 0, 0 with borrow gives 0xFFFFFFFF if borrow, 0 otherwise
     *borrow_out = borrow & 1;  // Convert 0xFFFFFFFF to 1
-}
-
-/**
- * Compare two 256-bit numbers
- * Returns: 1 if a > b, 0 if a == b, -1 if a < b
- */
-__device__ int _Compare256(const uint64_t a[4], const uint64_t b[4])
-{
-    for (int i = 3; i >= 0; i--) {
-        if (a[i] > b[i]) return 1;
-        if (a[i] < b[i]) return -1;
-    }
-    return 0;
 }
 
 /**
