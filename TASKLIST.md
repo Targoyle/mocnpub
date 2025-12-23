@@ -2,7 +2,7 @@
 
 **作成日**: 2025-11-14
 **最終更新**: 2025-12-23
-**進捗**: Step 0〜28 完了！🎉 5.707B keys/sec 達成！🔥🔥🔥
+**進捗**: Step 0〜29 完了！🎉 5.77B keys/sec 達成！🔥🔥🔥
 
 ---
 
@@ -40,6 +40,7 @@
 | Step 26 | _ReduceOverflow インライン化（分岐削除、+1.7%）| ✅ 完了 🔥🔥🔥 |
 | Step 27 | _Reduce512 while ループ簡素化（+2.1%）| ✅ 完了 🔥🔥🔥 |
 | Step 28 | 三項演算子完全削除 + ブランチレス prefix matching（32 prefix +1.3%）| ✅ 完了 🔥 |
+| Step 29 | ローカル配列 SoA 化（X_arr/Z_arr/c、+1.1%）| ✅ 完了 🔥 |
 
 ---
 
@@ -85,11 +86,12 @@
 | GPU + ループ融合（Montgomery's Trick 累積積） | 5.499B keys/sec | 78,557x |
 | GPU + _ReduceOverflow インライン化（分岐削除） | 5.590B keys/sec | 79,857x |
 | GPU + _Reduce512 while ループ簡素化 | 5.707B keys/sec | 81,529x |
-| **GPU + 三項演算子完全削除 + ブランチレス prefix matching** | **5.706B keys/sec** | **81,514x** 🔥 |
+| GPU + 三項演算子完全削除 + ブランチレス prefix matching | 5.706B keys/sec | 81,514x |
+| **GPU + ローカル配列 SoA 化（X_arr/Z_arr/c）** | **5.77B keys/sec** | **82,429x** 🔥 |
 
 **8文字 prefix が約 4 分で見つかる！** 🎉
 **CPU 使用率が 100% → 1% に削減！電力消費大幅削減！** 💡
-**32 prefix 時：5.457B keys/sec**（+1.3%）💪
+**32 prefix 時：5.504B keys/sec**（+0.9%）💪
 
 ---
 

@@ -268,11 +268,12 @@
 | GPU + ループ融合（Montgomery's Trick 累積積） | 5.499B keys/sec | 78,557x |
 | GPU + _ReduceOverflow インライン化（分岐削除） | 5.590B keys/sec | 79,857x |
 | GPU + _Reduce512 while ループ簡素化 | 5.707B keys/sec | 81,529x |
-| **GPU + 三項演算子完全削除 + ブランチレス prefix matching** | **5.706B keys/sec** | **81,514x** 🔥 |
+| GPU + 三項演算子完全削除 + ブランチレス prefix matching | 5.706B keys/sec | 81,514x |
+| **GPU + ローカル配列 SoA 化（X_arr/Z_arr/c）** | **5.77B keys/sec** | **82,429x** 🔥 |
 
 **8文字 prefix が約 4 分で見つかる！** 🎉
 
-**32 prefix 時：5.457B keys/sec**（+1.3%）💪
+**32 prefix 時：5.504B keys/sec**（+0.9%）💪
 
 ---
 
@@ -316,6 +317,7 @@
 | **_Reduce512 while ループ簡素化** | **+2.1%**（for + 複数 if-else → while 1条件、branch divergence #1 を攻略） 🔥🔥🔥 | ✅ 完了 |
 | **三項演算子完全削除** | **+0.3%**（_ModInv の i==0 条件をループ外に抽出、コード全体から三項演算子消滅） 🔥 | ✅ 完了 |
 | **ブランチレス prefix matching** | **+1.3%**（32 prefix 時、if+break → matched \|= 累積、分岐命令削除） 🔥 | ✅ 完了 |
+| **ローカル配列 SoA 化** | **+1.1%**（X_arr/Z_arr/c を AoS→SoA に変換、キャッシュ効率向上） 🔥 | ✅ 完了 |
 
 #### エンドモルフィズムの仕組み
 
