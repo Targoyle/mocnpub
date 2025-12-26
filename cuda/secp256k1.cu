@@ -1418,6 +1418,7 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
                 // Removing if+break eliminates branch instructions entirely.
                 // Note: _num_prefixes is always even (Rust pads odd count by duplicating last prefix)
                 uint32_t pair_count = _num_prefixes / 2;
+                #pragma unroll 4
                 for (uint32_t p = 0; p < pair_count; p++) {
                     uint32_t idx = p * 2;
                     // Concatenate two 32-bit patterns/masks into 64-bit
