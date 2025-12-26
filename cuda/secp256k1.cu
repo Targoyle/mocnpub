@@ -1405,31 +1405,11 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
             uint32_t x_upper32 = (uint32_t)(x_coords[endo][3] >> 32);
 
             // Optimized path for single prefix (most common case)
+            // Simple 32-bit loop: branchless matching with OR accumulation
+            // Match probability is ~2^-32, so the loop almost always runs fully.
             bool matched = false;
-            if (_num_prefixes == 1) {
-                matched = ((x_upper32 & _masks[0]) == _patterns[0]);
-            } else {
-                // 32bit × 2 concatenation: check 2 prefixes with 1 64-bit operation
-                // This halves the loop iterations for multiple prefixes
-                uint64_t x_doubled = ((uint64_t)x_upper32 << 32) | x_upper32;
-
-                // Branchless matching: accumulate match results with OR
-                // Match probability is ~2^-32, so the loop almost always runs fully.
-                // Removing if+break eliminates branch instructions entirely.
-                // Note: _num_prefixes is always even (Rust pads odd count by duplicating last prefix)
-                uint32_t pair_count = _num_prefixes / 2;
-                #pragma unroll 4
-                for (uint32_t p = 0; p < pair_count; p++) {
-                    uint32_t idx = p * 2;
-                    // Concatenate two 32-bit patterns/masks into 64-bit
-                    uint64_t combined_pattern = ((uint64_t)_patterns[idx + 1] << 32) | _patterns[idx];
-                    uint64_t combined_mask = ((uint64_t)_masks[idx + 1] << 32) | _masks[idx];
-
-                    // XOR and mask: if lower 32 bits are 0, patterns[idx] matches
-                    //               if upper 32 bits are 0, patterns[idx+1] matches
-                    uint64_t diff = (x_doubled ^ combined_pattern) & combined_mask;
-                    matched |= ((diff & 0xFFFFFFFFULL) == 0) | ((diff >> 32) == 0);
-                }
+            for (uint32_t p = 0; p < _num_prefixes; p++) {
+                matched |= ((x_upper32 & _masks[p]) == _patterns[p]);
             }
 
             if (matched) {
