@@ -1,8 +1,8 @@
 # mocnpub タスクリスト 📋
 
 **作成日**: 2025-11-14
-**最終更新**: 2025-12-23
-**進捗**: Step 0〜29 完了！🎉 5.77B keys/sec 達成！🔥🔥🔥
+**最終更新**: 2025-12-26
+**進捗**: Step 0〜30 完了！🎉 5.80B keys/sec 達成！🔥🔥🔥
 
 ---
 
@@ -41,6 +41,7 @@
 | Step 27 | _Reduce512 while ループ簡素化（+2.1%）| ✅ 完了 🔥🔥🔥 |
 | Step 28 | 三項演算子完全削除 + ブランチレス prefix matching（32 prefix +1.3%）| ✅ 完了 🔥 |
 | Step 29 | ローカル配列 SoA 化（X_arr/Z_arr/c、+1.1%）| ✅ 完了 🔥 |
+| Step 30 | Z² 累積積戦略（Montgomery's Trick で ModSquare 1600回削減、+0.5%）| ✅ 完了 🔥 |
 
 ---
 
@@ -87,11 +88,12 @@
 | GPU + _ReduceOverflow インライン化（分岐削除） | 5.590B keys/sec | 79,857x |
 | GPU + _Reduce512 while ループ簡素化 | 5.707B keys/sec | 81,529x |
 | GPU + 三項演算子完全削除 + ブランチレス prefix matching | 5.706B keys/sec | 81,514x |
-| **GPU + ローカル配列 SoA 化（X_arr/Z_arr/c）** | **5.77B keys/sec** | **82,429x** 🔥 |
+| GPU + ローカル配列 SoA 化（X_arr/Z_arr/c） | 5.77B keys/sec | 82,429x |
+| **GPU + Z² 累積積戦略（ModSquare 1600回削減）** | **5.80B keys/sec** | **82,857x** 🔥 |
 
 **8文字 prefix が約 4 分で見つかる！** 🎉
 **CPU 使用率が 100% → 1% に削減！電力消費大幅削減！** 💡
-**32 prefix 時：5.504B keys/sec**（+0.9%）💪
+**32 prefix 時：5.567B keys/sec**（1 prefix の 96%）💪
 
 ---
 
