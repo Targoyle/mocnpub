@@ -2,6 +2,9 @@
 name = "mocnpub-main"
 version = "0.1.0"
 edition = "2024"
+description = "High-performance Nostr npub vanity address miner with CUDA"
+repository = "https://github.com/high-moctane/mocnpub"
+license = "MIT"
 
 [dependencies]
 cudarc = { version = "0.18.2", features = ["cuda-version-from-build-system"] }
