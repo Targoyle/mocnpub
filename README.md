@@ -77,7 +77,7 @@ Search for multiple prefixes at once (OR matching):
 ./target/release/mocnpub-main mine --prefix m0ctane0
 
 # Find multiple keys
-./target/release/mocnpub-main mine --prefix moc --limit 5
+./target/release/mocnpub-main mine --prefix m0c --limit 5
 
 # Save to file
 ./target/release/mocnpub-main mine --prefix test --output keys.txt
