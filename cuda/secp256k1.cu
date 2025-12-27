@@ -951,65 +951,74 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
  * Cost: 8M + 2S (vs 12M + 4S for general point addition)
  * Note: Z1^2 is passed as input, Z3^2 is computed as output for reuse.
  */
+// In-place point addition: P1 = P1 + P2 (Mixed coordinates)
+// P1: Jacobian (X, Y, Z, Z_squared), P2: Affine (X2, Y2, Z2=1)
 __device__ void _PointAddMixed(
-    const uint64_t X1[4], const uint64_t Y1[4], const uint64_t Z1[4],  // Jacobian point
-    const uint64_t Z1_squared[4],                                      // Z1^2 (precomputed)
-    const uint64_t X2[4], const uint64_t Y2[4],                        // Affine point (Z2=1)
-    uint64_t X3[4], uint64_t Y3[4], uint64_t Z3[4],
-    uint64_t Z3_squared[4]                                             // Z3^2 = Z1^2 * H^2
+    uint64_t X[4], uint64_t Y[4], uint64_t Z[4],  // Jacobian point (in/out)
+    uint64_t Z_squared[4],                         // Z^2 (in/out)
+    const uint64_t X2[4], const uint64_t Y2[4]     // Affine point (Z2=1)
 )
 {
-    uint64_t Z1_cubed[4];
+    uint64_t Z_cubed[4];
     uint64_t U2[4], S2[4];
     uint64_t H[4], H_squared[4], H_cubed[4];
     uint64_t R[4], R_squared[4];
-    uint64_t X1_H2[4];  // X1 * H^2 (reused to avoid duplicate computation)
+    uint64_t X_H2[4];  // X * H^2 (reused to avoid duplicate computation)
     uint64_t temp[4], temp2[4];
+    uint64_t newX[4], newY[4], newZ[4], newZ_squared[4];
 
-    // Z1^3 (Z1^2 is passed as input)
-    _ModMult(Z1_squared, Z1, Z1_cubed);      // M1: Z1^3
+    // Z^3 (Z^2 is passed as input)
+    _ModMult(Z_squared, Z, Z_cubed);          // M1: Z^3
 
-    // U1 = X1 (since Z2^2 = 1, no multiplication needed)
-    // S1 = Y1 (since Z2^3 = 1, no multiplication needed)
+    // U1 = X (since Z2^2 = 1, no multiplication needed)
+    // S1 = Y (since Z2^3 = 1, no multiplication needed)
 
-    // U2 = X2 * Z1^2
-    _ModMult(X2, Z1_squared, U2);            // M2: U2
+    // U2 = X2 * Z^2
+    _ModMult(X2, Z_squared, U2);              // M2: U2
 
-    // S2 = Y2 * Z1^3
-    _ModMult(Y2, Z1_cubed, S2);              // M3: S2
+    // S2 = Y2 * Z^3
+    _ModMult(Y2, Z_cubed, S2);                // M3: S2
 
-    // H = U2 - U1 = U2 - X1
-    _ModSub(U2, X1, H);
+    // H = U2 - U1 = U2 - X
+    _ModSub(U2, X, H);
 
-    // R = S2 - S1 = S2 - Y1
-    _ModSub(S2, Y1, R);
+    // R = S2 - S1 = S2 - Y
+    _ModSub(S2, Y, R);
 
     // H^2 and H^3
-    _ModSquare(H, H_squared);                // S2: H^2
-    _ModMult(H_squared, H, H_cubed);         // M4: H^3
+    _ModSquare(H, H_squared);                 // S2: H^2
+    _ModMult(H_squared, H, H_cubed);          // M4: H^3
 
     // R^2
-    _ModSquare(R, R_squared);                // S3: R^2
+    _ModSquare(R, R_squared);                 // S3: R^2
 
-    // X3 = R^2 - H^3 - 2*U1*H^2 = R^2 - H^3 - 2*X1*H^2
-    _ModMult(X1, H_squared, X1_H2);          // M5: X1 * H^2 (save for reuse)
-    _ModAdd(X1_H2, X1_H2, temp);             // temp = 2 * X1 * H^2
-    _ModSub(R_squared, H_cubed, temp2);      // temp2 = R^2 - H^3
-    _ModSub(temp2, temp, X3);                // X3 = R^2 - H^3 - 2*X1*H^2
+    // newX = R^2 - H^3 - 2*U1*H^2 = R^2 - H^3 - 2*X*H^2
+    _ModMult(X, H_squared, X_H2);             // M5: X * H^2 (save for reuse)
+    _ModAdd(X_H2, X_H2, temp);                // temp = 2 * X * H^2
+    _ModSub(R_squared, H_cubed, temp2);       // temp2 = R^2 - H^3
+    _ModSub(temp2, temp, newX);               // newX = R^2 - H^3 - 2*X*H^2
 
-    // Y3 = R * (U1*H^2 - X3) - S1*H^3 = R * (X1*H^2 - X3) - Y1*H^3
-    // Reuse X1_H2 instead of recomputing X1 * H^2
-    _ModSub(X1_H2, X3, temp);                // temp = X1*H^2 - X3
-    _ModMult(R, temp, temp2);                // M6: R * (X1*H^2 - X3)
-    _ModMult(Y1, H_cubed, temp);             // M7: Y1 * H^3
-    _ModSub(temp2, temp, Y3);                // Y3 = R * (X1*H^2 - X3) - Y1*H^3
+    // newY = R * (U1*H^2 - newX) - S1*H^3 = R * (X*H^2 - newX) - Y*H^3
+    // Reuse X_H2 instead of recomputing X * H^2
+    _ModSub(X_H2, newX, temp);                // temp = X*H^2 - newX
+    _ModMult(R, temp, temp2);                 // M6: R * (X*H^2 - newX)
+    _ModMult(Y, H_cubed, temp);               // M7: Y * H^3
+    _ModSub(temp2, temp, newY);               // newY = R * (X*H^2 - newX) - Y*H^3
 
-    // Z3 = Z1 * H (since Z2 = 1)
-    _ModMult(Z1, H, Z3);                     // M8: Z3
+    // newZ = Z * H (since Z2 = 1)
+    _ModMult(Z, H, newZ);                     // M8: newZ
 
-    // Z3^2 = Z1^2 * H^2 (for Montgomery's Trick optimization)
-    _ModMult(Z1_squared, H_squared, Z3_squared);  // M9: Z3^2
-    // Total: 9M + 2S (8M + 2S core + 1M for Z3^2, saves 1S per call in chain)
+    // newZ^2 = Z^2 * H^2 (for Montgomery's Trick optimization)
+    _ModMult(Z_squared, H_squared, newZ_squared);  // M9: newZ^2
+
+    // Write results back
+    for (int i = 0; i < 4; i++) {
+        X[i] = newX[i];
+        Y[i] = newY[i];
+        Z[i] = newZ[i];
+        Z_squared[i] = newZ_squared[i];
+    }
+    // Total: 9M + 2S (8M + 2S core + 1M for Z^2, saves 1S per call in chain)
 }
 
 /**
@@ -1057,8 +1066,8 @@ __device__ void _PointMultByIndex(
                 dG_y[i] = _dG_table[bit * 8 + 4 + i];
             }
 
-            // Add: R = R + dG_table[bit] (in-place update)
-            _PointAddMixed(Rx, Ry, Rz, Rz_squared, dG_x, dG_y, Rx, Ry, Rz, Rz_squared);
+            // Add: R = R + dG_table[bit] (in-place)
+            _PointAddMixed(Rx, Ry, Rz, Rz_squared, dG_x, dG_y);
         }
     }
 }
@@ -1314,8 +1323,8 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
     c_0[0] = Z_arr_0[0]; c_1[0] = Z_arr_1[0]; c_2[0] = Z_arr_2[0]; c_3[0] = Z_arr_3[0];
 
     for (uint32_t key_idx = 1; key_idx < n; key_idx++) {
-        // P = P + G (in-place update)
-        _PointAddMixed(Px, Py, Pz, Pz_squared, Gx, Gy, Px, Py, Pz, Pz_squared);
+        // P = P + G (in-place)
+        _PointAddMixed(Px, Py, Pz, Pz_squared, Gx, Gy);
 
         X_arr_0[key_idx] = Px[0]; X_arr_1[key_idx] = Px[1];
         X_arr_2[key_idx] = Px[2]; X_arr_3[key_idx] = Px[3];
