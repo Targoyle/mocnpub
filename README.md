@@ -151,6 +151,7 @@ For detailed information about the development journey:
 - [JOURNEY.md](docs/JOURNEY.md) - The complete story of building mocnpub
 - [OPTIMIZATION.md](docs/OPTIMIZATION.md) - Technical deep-dive into all 35 optimization steps
 - [LEARNING.md](docs/LEARNING.md) - Learning path from beginner to PTX mastery
+- [CODE_REVIEW.md](docs/CODE_REVIEW.md) - Code review by Claude (Web) 🌸
 
 ## Built With
 
