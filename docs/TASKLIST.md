@@ -27,7 +27,7 @@ Preparing mocnpub for public release! 🌸
 |------|------|------|--------|
 | **JOURNEY.md** | Story of pair programming (emotional, fun to read) | mocnpub-journey.md | [x] Complete |
 | **OPTIMIZATION.md** | Technical deep-dive (optimization techniques, perf analysis) | OPTIMIZATION.md | [x] Complete |
-| **LEARNING.md** | Learning path (secp256k1, CUDA, PTX tutorials) | LEARNING.md | [ ] Not started |
+| **LEARNING.md** | Learning path (secp256k1, CUDA, PTX tutorials) | LEARNING.md | [x] Complete |
 
 ### Priority 2: Root Files
 
@@ -112,12 +112,12 @@ Preparing mocnpub for public release! 🌸
 
 **Content**: Learning journey, tutorials embedded in narrative
 
-- [ ] Copy base file to docs/LEARNING.md
-- [ ] Remove work log filename references
-- [ ] Verify secp256k1 explanations are accurate
-- [ ] Check CUDA/PTX educational content
-- [ ] Add navigation links to other docs
-- [ ] Final educational review
+- [x] Copy base file to docs/LEARNING.md
+- [x] Remove work log filename references (none found - source was clean!)
+- [x] Verify secp256k1 explanations are accurate
+- [x] Check CUDA/PTX educational content
+- [x] Add navigation links to other docs
+- [x] Final educational review
 
 **Sections to preserve**:
 - Week-by-week growth narrative
