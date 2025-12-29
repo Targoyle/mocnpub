@@ -937,9 +937,9 @@ __device__ void _ModInv(const uint64_t a[4], uint64_t result[4])
  *   - Z3 = Z1 * H (no multiplication by Z2)
  *   - Z3^2 = Z1^2 * H^2 (computed for Montgomery's Trick optimization)
  *
- * Cost: 9M + 2S (vs 12M + 4S for general point addition)
+ * Cost: 8M + 3S (vs 12M + 4S for general point addition)
  *   - 8M + 2S for core point addition
- *   - +1M for computing Z3^2 (saves 1S per call in chain)
+ *   - +1S for computing Z3^2 (saves 1S per call in chain)
  */
 // In-place point addition: P1 = P1 + P2 (Mixed coordinates)
 // P1: Jacobian (X, Y, Z, Z_squared), P2: Affine (X2, Y2, Z2=1)
@@ -998,8 +998,8 @@ __device__ void _PointAddMixed(
     // newZ = Z * H (since Z2 = 1)
     _ModMult(Z, H, newZ);                     // M8: newZ
 
-    // newZ^2 = Z^2 * H^2 (for Montgomery's Trick optimization)
-    _ModMult(Z_squared, H_squared, newZ_squared);  // M9: newZ^2
+    // newZ^2 = newZ * newZ (optimized square instead of Z^2 * H^2)
+    _ModSquare(newZ, newZ_squared);  // S4: newZ^2
 
     // Write results back
     for (int i = 0; i < 4; i++) {
