@@ -343,6 +343,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cudarc"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d5be1e9776a20360ca270df637b391c85d48ea57508140f30a4e8f6da91884a"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -645,7 +654,7 @@ version = "0.1.0"
 dependencies = [
  "bech32",
  "clap",
- "cudarc",
+ "cudarc 0.18.2",
  "hex",
  "image",
  "num-complex",
@@ -658,7 +667,7 @@ dependencies = [
 name = "mocnpub-main-fuzz"
 version = "0.0.0"
 dependencies = [
- "cudarc",
+ "cudarc 0.19.0",
  "libfuzzer-sys",
  "mocnpub-main",
 ]
