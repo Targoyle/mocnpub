@@ -12,6 +12,7 @@ use cudarc::driver::{CudaContext, CudaFunction, CudaModule, LaunchConfig, PushKe
 use cudarc::nvrtc::Ptx;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use std::sync::Arc;
+use crate::pubkey_x_to_suffix_window;
 
 /// Get MAX_KEYS_PER_THREAD (compile-time constant)
 /// This matches the value used in the CUDA kernel.
@@ -369,7 +370,7 @@ pub fn test_mod_square_gpu(
     Ok(result)
 }
 
-/// Match result from GPU prefix matching
+/// Match result from GPU prefix/suffix matching
 #[derive(Debug, Clone)]
 pub struct GpuMatch {
     /// Thread index (which base key)
@@ -411,16 +412,22 @@ pub struct SequentialTripleBufferMiner {
     _module: std::sync::Arc<CudaModule>,
     kernel: CudaFunction,
     // Original 64-bit patterns/masks for CPU re-verification
-    patterns_64: Vec<u64>,
-    masks_64: Vec<u64>,
+    prefix_patterns_64: Vec<u64>,
+    prefix_masks_64: Vec<u64>,
+    suffix_patterns_64: Vec<u64>,
+    suffix_masks_64: Vec<u64>,
     // Constant memory slices (kept alive to prevent cuMemFree on drop)
     _dg_table_const: cudarc::driver::CudaSlice<u8>,
     _patterns_const: cudarc::driver::CudaSlice<u8>,
     _masks_const: cudarc::driver::CudaSlice<u8>,
+    _patterns64_const: cudarc::driver::CudaSlice<u8>,
+    _masks64_const: cudarc::driver::CudaSlice<u8>,
     _num_prefixes_const: cudarc::driver::CudaSlice<u8>,
+    _num_suffixes_const: cudarc::driver::CudaSlice<u8>,
     _num_threads_const: cudarc::driver::CudaSlice<u8>,
     _max_matches_const: cudarc::driver::CudaSlice<u8>,
     num_prefixes: usize,
+    num_suffixes: usize,
     max_matches: u32,
     threads_per_block: u32,
     bufs: Vec<SequentialStreamBuffer>,
@@ -431,11 +438,13 @@ impl SequentialTripleBufferMiner {
     pub fn new(
         ctx: &std::sync::Arc<CudaContext>,
         prefix_bits: &[(u64, u64, u32)],
+        suffix_bits: &[(u64, u64, u32)],
         max_matches: u32,
         threads_per_block: u32,
         batch_size: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let num_prefixes = prefix_bits.len();
+        let num_suffixes = suffix_bits.len();
 
         // Create three streams using fork - ALL non-default!
         // Default stream implicitly synchronizes with other streams,
@@ -453,35 +462,51 @@ impl SequentialTripleBufferMiner {
 
         // Prepare prefix patterns and masks
         // Keep 64-bit versions for CPU re-verification
-        let patterns_64: Vec<u64> = prefix_bits.iter().map(|(p, _, _)| *p).collect();
-        let masks_64: Vec<u64> = prefix_bits.iter().map(|(_, m, _)| *m).collect();
-
-        // Convert to 32-bit for GPU (extract upper 32 bits)
-        let mut patterns_32: Vec<u32> = patterns_64.iter().map(|p| (*p >> 32) as u32).collect();
-        let mut masks_32: Vec<u32> = masks_64.iter().map(|m| (*m >> 32) as u32).collect();
+        let prefix_patterns_64: Vec<u64> = prefix_bits.iter().map(|(p, _, _)| *p).collect();
+        let prefix_masks_64: Vec<u64> = prefix_bits.iter().map(|(_, m, _)| *m).collect();
+        let mut prefix_patterns_32: Vec<u32> = prefix_patterns_64
+            .iter()
+            .map(|p| (*p >> 32) as u32)
+            .collect();
+        let mut prefix_masks_32: Vec<u32> =
+            prefix_masks_64.iter().map(|m| (*m >> 32) as u32).collect();
 
         // Pad to even count by duplicating last prefix (avoids branch in CUDA kernel)
         // Duplicating is safe: matching the same prefix twice just sets matched=true twice
         // Note: Only pad when num_prefixes > 1 (single prefix uses optimized path, no loop)
         let num_prefixes_gpu = if num_prefixes > 1 && num_prefixes % 2 == 1 {
-            patterns_32.push(patterns_32[num_prefixes - 1]);
-            masks_32.push(masks_32[num_prefixes - 1]);
+            prefix_patterns_32.push(prefix_patterns_32[num_prefixes - 1]);
+            prefix_masks_32.push(prefix_masks_32[num_prefixes - 1]);
             num_prefixes + 1
         } else {
             num_prefixes
+        };
+
+        // Prepare suffix patterns and masks (64-bit bech32 window)
+        let mut suffix_patterns_64: Vec<u64> = suffix_bits.iter().map(|(p, _, _)| *p).collect();
+        let mut suffix_masks_64: Vec<u64> = suffix_bits.iter().map(|(_, m, _)| *m).collect();
+        let num_suffixes_gpu = if num_suffixes > 1 && num_suffixes % 2 == 1 {
+            suffix_patterns_64.push(suffix_patterns_64[num_suffixes - 1]);
+            suffix_masks_64.push(suffix_masks_64[num_suffixes - 1]);
+            num_suffixes + 1
+        } else {
+            num_suffixes
         };
 
         // Upload patterns/masks to constant memory
         // Using get_global() to access __constant__ variables in CUDA
         let mut patterns_const = module.get_global("_patterns", &stream_0)?;
         let mut masks_const = module.get_global("_masks", &stream_0)?;
+        let mut patterns64_const = module.get_global("_patterns64", &stream_0)?;
+        let mut masks64_const = module.get_global("_masks64", &stream_0)?;
         let mut num_prefixes_const = module.get_global("_num_prefixes", &stream_0)?;
+        let mut num_suffixes_const = module.get_global("_num_suffixes", &stream_0)?;
 
         // Convert to bytes and copy to constant memory
         // Pad to 256 elements (constant memory array size)
-        let mut patterns_padded = patterns_32.clone();
+        let mut patterns_padded = prefix_patterns_32.clone();
         patterns_padded.resize(256, 0);
-        let mut masks_padded = masks_32.clone();
+        let mut masks_padded = prefix_masks_32.clone();
         masks_padded.resize(256, 0);
 
         let patterns_bytes: Vec<u8> = patterns_padded
@@ -489,11 +514,23 @@ impl SequentialTripleBufferMiner {
             .flat_map(|x| x.to_ne_bytes())
             .collect();
         let masks_bytes: Vec<u8> = masks_padded.iter().flat_map(|x| x.to_ne_bytes()).collect();
+        let mut patterns64_padded = suffix_patterns_64.clone();
+        let mut masks64_padded = suffix_masks_64.clone();
+        patterns64_padded.resize(256, 0);
+        masks64_padded.resize(256, 0);
+        let patterns64_bytes: Vec<u8> =
+            patterns64_padded.iter().flat_map(|x| x.to_ne_bytes()).collect();
+        let masks64_bytes: Vec<u8> =
+            masks64_padded.iter().flat_map(|x| x.to_ne_bytes()).collect();
         let num_prefixes_bytes = (num_prefixes_gpu as u32).to_ne_bytes();
+        let num_suffixes_bytes = (num_suffixes_gpu as u32).to_ne_bytes();
 
         stream_0.memcpy_htod(&patterns_bytes, &mut patterns_const)?;
         stream_0.memcpy_htod(&masks_bytes, &mut masks_const)?;
+        stream_0.memcpy_htod(&patterns64_bytes, &mut patterns64_const)?;
+        stream_0.memcpy_htod(&masks64_bytes, &mut masks64_const)?;
         stream_0.memcpy_htod(&num_prefixes_bytes, &mut num_prefixes_const)?;
+        stream_0.memcpy_htod(&num_suffixes_bytes, &mut num_suffixes_const)?;
 
         // Upload num_threads and max_matches to constant memory
         let mut num_threads_const = module.get_global("_num_threads", &stream_0)?;
@@ -543,15 +580,21 @@ impl SequentialTripleBufferMiner {
             streams,
             _module: module,
             kernel,
-            patterns_64,
-            masks_64,
+            prefix_patterns_64,
+            prefix_masks_64,
+            suffix_patterns_64,
+            suffix_masks_64,
             _dg_table_const: dg_table_const,
             _patterns_const: patterns_const,
             _masks_const: masks_const,
+            _patterns64_const: patterns64_const,
+            _masks64_const: masks64_const,
             _num_prefixes_const: num_prefixes_const,
+            _num_suffixes_const: num_suffixes_const,
             _num_threads_const: num_threads_const,
             _max_matches_const: max_matches_const,
             num_prefixes,
+            num_suffixes,
             max_matches,
             threads_per_block,
             bufs,
@@ -568,7 +611,7 @@ impl SequentialTripleBufferMiner {
         idx: usize,
         base_key: &[u64; 4],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.num_prefixes == 0 {
+        if self.num_prefixes == 0 && self.num_suffixes == 0 {
             return Ok(());
         }
 
@@ -600,7 +643,7 @@ impl SequentialTripleBufferMiner {
         builder.arg(&mut buf.base_pubkey_x_dev);
         builder.arg(&mut buf.base_pubkey_y_dev);
         // All runtime constants are in constant memory:
-        // dG_table, patterns, masks, num_prefixes, num_threads, max_matches
+        // dG_table, prefix/suffix patterns, num_prefixes, num_suffixes, num_threads, max_matches
         builder.arg(&mut buf.matched_base_idx_dev);
         builder.arg(&mut buf.matched_offset_dev);
         builder.arg(&mut buf.matched_pubkeys_x_dev);
@@ -619,7 +662,7 @@ impl SequentialTripleBufferMiner {
     /// # Arguments
     /// * `idx` - Buffer index (0, 1, or 2)
     pub fn collect_single(&self, idx: usize) -> Result<Vec<GpuMatch>, Box<dyn std::error::Error>> {
-        if self.num_prefixes == 0 {
+        if self.num_prefixes == 0 && self.num_suffixes == 0 {
             return Ok(vec![]);
         }
 
@@ -650,12 +693,25 @@ impl SequentialTripleBufferMiner {
 
             // CPU re-verification with 64-bit patterns (GPU uses 32-bit for speed)
             // This filters out false positives from 32-bit matching
-            let x_upper = pubkey_x[3]; // Most significant 64 bits
-            let is_real_match = self
-                .patterns_64
-                .iter()
-                .zip(self.masks_64.iter())
-                .any(|(pattern, mask)| (x_upper & mask) == (pattern & mask));
+            let prefix_match = if self.num_prefixes == 0 {
+                true
+            } else {
+                let x_upper = pubkey_x[3]; // Most significant 64 bits
+                self.prefix_patterns_64
+                    .iter()
+                    .zip(self.prefix_masks_64.iter())
+                    .any(|(pattern, mask)| (x_upper & mask) == (pattern & mask))
+            };
+            let suffix_match = if self.num_suffixes == 0 {
+                true
+            } else {
+                let suffix_window = pubkey_x_to_suffix_window(&pubkey_x);
+                self.suffix_patterns_64
+                    .iter()
+                    .zip(self.suffix_masks_64.iter())
+                    .any(|(pattern, mask)| (suffix_window & mask) == (pattern & mask))
+            };
+            let is_real_match = prefix_match && suffix_match;
 
             if is_real_match {
                 results.push(GpuMatch {
@@ -687,6 +743,7 @@ impl SequentialTripleBufferMiner {
 /// * `base_key` - Single starting private key (all threads compute from this)
 /// * `num_threads` - Number of threads (batch_size)
 /// * `prefix_bits` - Prefix patterns and masks: Vec<(pattern, mask, bit_len)>
+/// * `suffix_bits` - Suffix patterns and masks: Vec<(pattern, mask, bit_len)>
 /// * `max_matches` - Maximum number of matches to return
 /// * `threads_per_block` - Number of threads per block
 ///
@@ -697,12 +754,14 @@ pub fn generate_pubkeys_sequential(
     base_key: &[u64; 4],
     num_threads: usize,
     prefix_bits: &[(u64, u64, u32)],
+    suffix_bits: &[(u64, u64, u32)],
     max_matches: u32,
     threads_per_block: u32,
 ) -> Result<Vec<GpuMatch>, Box<dyn std::error::Error>> {
     let num_prefixes = prefix_bits.len();
+    let num_suffixes = suffix_bits.len();
 
-    if num_threads == 0 || num_prefixes == 0 {
+    if num_threads == 0 || (num_prefixes == 0 && num_suffixes == 0) {
         return Ok(vec![]);
     }
 
@@ -716,22 +775,35 @@ pub fn generate_pubkeys_sequential(
 
     // Prepare prefix patterns and masks
     // Keep 64-bit versions for CPU re-verification
-    let patterns_64: Vec<u64> = prefix_bits.iter().map(|(p, _, _)| *p).collect();
-    let masks_64: Vec<u64> = prefix_bits.iter().map(|(_, m, _)| *m).collect();
-
-    // Convert to 32-bit for GPU (extract upper 32 bits)
-    let mut patterns_32: Vec<u32> = patterns_64.iter().map(|p| (*p >> 32) as u32).collect();
-    let mut masks_32: Vec<u32> = masks_64.iter().map(|m| (*m >> 32) as u32).collect();
+    let prefix_patterns_64: Vec<u64> = prefix_bits.iter().map(|(p, _, _)| *p).collect();
+    let prefix_masks_64: Vec<u64> = prefix_bits.iter().map(|(_, m, _)| *m).collect();
+    let mut prefix_patterns_32: Vec<u32> = prefix_patterns_64
+        .iter()
+        .map(|p| (*p >> 32) as u32)
+        .collect();
+    let mut prefix_masks_32: Vec<u32> =
+        prefix_masks_64.iter().map(|m| (*m >> 32) as u32).collect();
 
     // Pad to even count by duplicating last prefix (avoids branch in CUDA kernel)
     // Duplicating is safe: matching the same prefix twice just sets matched=true twice
     // Note: Only pad when num_prefixes > 1 (single prefix uses optimized path, no loop)
     let num_prefixes_gpu = if num_prefixes > 1 && num_prefixes % 2 == 1 {
-        patterns_32.push(patterns_32[num_prefixes - 1]);
-        masks_32.push(masks_32[num_prefixes - 1]);
+        prefix_patterns_32.push(prefix_patterns_32[num_prefixes - 1]);
+        prefix_masks_32.push(prefix_masks_32[num_prefixes - 1]);
         num_prefixes + 1
     } else {
         num_prefixes
+    };
+
+    // Prepare suffix patterns and masks (64-bit bech32 window)
+    let mut suffix_patterns_64: Vec<u64> = suffix_bits.iter().map(|(p, _, _)| *p).collect();
+    let mut suffix_masks_64: Vec<u64> = suffix_bits.iter().map(|(_, m, _)| *m).collect();
+    let num_suffixes_gpu = if num_suffixes > 1 && num_suffixes % 2 == 1 {
+        suffix_patterns_64.push(suffix_patterns_64[num_suffixes - 1]);
+        suffix_masks_64.push(suffix_masks_64[num_suffixes - 1]);
+        num_suffixes + 1
+    } else {
+        num_suffixes
     };
 
     // Allocate device memory for inputs
@@ -759,12 +831,15 @@ pub fn generate_pubkeys_sequential(
     // Upload patterns/masks/num_prefixes to constant memory
     let mut patterns_const = module.get_global("_patterns", &stream)?;
     let mut masks_const = module.get_global("_masks", &stream)?;
+    let mut patterns64_const = module.get_global("_patterns64", &stream)?;
+    let mut masks64_const = module.get_global("_masks64", &stream)?;
     let mut num_prefixes_const = module.get_global("_num_prefixes", &stream)?;
+    let mut num_suffixes_const = module.get_global("_num_suffixes", &stream)?;
 
     // Pad to 256 elements (constant memory array size)
-    let mut patterns_padded = patterns_32.clone();
+    let mut patterns_padded = prefix_patterns_32.clone();
     patterns_padded.resize(256, 0);
-    let mut masks_padded = masks_32.clone();
+    let mut masks_padded = prefix_masks_32.clone();
     masks_padded.resize(256, 0);
 
     let patterns_bytes: Vec<u8> = patterns_padded
@@ -772,11 +847,22 @@ pub fn generate_pubkeys_sequential(
         .flat_map(|x| x.to_ne_bytes())
         .collect();
     let masks_bytes: Vec<u8> = masks_padded.iter().flat_map(|x| x.to_ne_bytes()).collect();
+    let mut patterns64_padded = suffix_patterns_64.clone();
+    let mut masks64_padded = suffix_masks_64.clone();
+    patterns64_padded.resize(256, 0);
+    masks64_padded.resize(256, 0);
+    let patterns64_bytes: Vec<u8> =
+        patterns64_padded.iter().flat_map(|x| x.to_ne_bytes()).collect();
+    let masks64_bytes: Vec<u8> = masks64_padded.iter().flat_map(|x| x.to_ne_bytes()).collect();
     let num_prefixes_bytes = (num_prefixes_gpu as u32).to_ne_bytes();
+    let num_suffixes_bytes = (num_suffixes_gpu as u32).to_ne_bytes();
 
     stream.memcpy_htod(&patterns_bytes, &mut patterns_const)?;
     stream.memcpy_htod(&masks_bytes, &mut masks_const)?;
+    stream.memcpy_htod(&patterns64_bytes, &mut patterns64_const)?;
+    stream.memcpy_htod(&masks64_bytes, &mut masks64_const)?;
     stream.memcpy_htod(&num_prefixes_bytes, &mut num_prefixes_const)?;
+    stream.memcpy_htod(&num_suffixes_bytes, &mut num_suffixes_const)?;
 
     // Upload num_threads and max_matches to constant memory
     let mut num_threads_const = module.get_global("_num_threads", &stream)?;
@@ -806,7 +892,7 @@ pub fn generate_pubkeys_sequential(
     builder.arg(&mut base_pubkey_x_dev);
     builder.arg(&mut base_pubkey_y_dev);
     // All runtime constants are in constant memory:
-    // dG_table, patterns, masks, num_prefixes, num_threads, max_matches
+    // dG_table, prefix/suffix patterns, num_prefixes, num_suffixes, num_threads, max_matches
     builder.arg(&mut matched_base_idx_dev);
     builder.arg(&mut matched_offset_dev);
     builder.arg(&mut matched_pubkeys_x_dev);
@@ -842,11 +928,25 @@ pub fn generate_pubkeys_sequential(
 
         // CPU re-verification with 64-bit patterns (GPU uses 32-bit for speed)
         // This filters out false positives from 32-bit matching
+    let prefix_match = if num_prefixes == 0 {
+        true
+    } else {
         let x_upper = pubkey_x[3]; // Most significant 64 bits
-        let is_real_match = patterns_64
+        prefix_patterns_64
             .iter()
-            .zip(masks_64.iter())
-            .any(|(pattern, mask)| (x_upper & mask) == (pattern & mask));
+            .zip(prefix_masks_64.iter())
+            .any(|(pattern, mask)| (x_upper & mask) == (pattern & mask))
+    };
+    let suffix_match = if num_suffixes == 0 {
+        true
+    } else {
+        let suffix_window = pubkey_x_to_suffix_window(&pubkey_x);
+        suffix_patterns_64
+            .iter()
+            .zip(suffix_masks_64.iter())
+            .any(|(pattern, mask)| (suffix_window & mask) == (pattern & mask))
+    };
+    let is_real_match = prefix_match && suffix_match;
 
         if is_real_match {
             results.push(GpuMatch {
@@ -867,10 +967,27 @@ pub fn generate_pubkeys_sequential(
 mod tests {
     use super::*;
 
+    fn try_init_gpu() -> Option<std::sync::Arc<CudaContext>> {
+        match std::panic::catch_unwind(|| init_gpu()) {
+            Ok(Ok(ctx)) => Some(ctx),
+            Ok(Err(e)) => {
+                eprintln!("skipping GPU test: {}", e);
+                None
+            }
+            Err(_) => {
+                eprintln!("skipping GPU test: CUDA driver unavailable");
+                None
+            }
+        }
+    }
+
     #[test]
     fn test_gpu_mod_add_simple() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Test case: 1 + 1 = 2 (mod p)
         let a = [1u64, 0, 0, 0];
@@ -885,7 +1002,10 @@ mod tests {
     #[test]
     fn test_gpu_mod_add_overflow() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Test case: p - 1 + 2 = 1 (mod p)
         // p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
@@ -906,7 +1026,10 @@ mod tests {
     #[test]
     fn test_gpu_mod_mult_simple() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Test case: 2 * 3 = 6 (mod p)
         let a = [2u64, 0, 0, 0];
@@ -922,7 +1045,10 @@ mod tests {
     #[test]
     fn test_gpu_mod_mult_large() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Test case: 2^128 * 2^128 = 2^256 mod p = 2^32 + 977
         // a = 2^128 = [0, 0, 1, 0]
@@ -944,7 +1070,10 @@ mod tests {
     #[test]
     fn test_gpu_mod_inv_one() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Test case: inv(1) = 1 mod p
         let a = [1u64, 0, 0, 0];
@@ -957,7 +1086,10 @@ mod tests {
     #[test]
     fn test_gpu_mod_inv_simple() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Test case: inv(2) mod p
         // We verify: 2 * inv(2) ≡ 1 (mod p)
@@ -985,7 +1117,10 @@ mod tests {
     #[test]
     fn test_gpu_mod_inv_three() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Test case: inv(3) mod p
         // We verify: 3 * inv(3) ≡ 1 (mod p)
@@ -1013,7 +1148,10 @@ mod tests {
     #[test]
     fn test_gpu_mod_square_simple() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Test case: 2^2 = 4 (mod p)
         let a = [2u64, 0, 0, 0];
@@ -1026,7 +1164,10 @@ mod tests {
     #[test]
     fn test_gpu_mod_square_2_128() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Test case: (2^128)^2 = 2^256 mod p = 2^32 + 977 = 0x1000003D1
         // 2^128 is represented as [0, 0, 1, 0] (little-endian)
@@ -1044,7 +1185,10 @@ mod tests {
     #[test]
     fn test_gpu_mod_square_larger() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Test case: 3^2 = 9 (mod p)
         let a = [3u64, 0, 0, 0];
@@ -1057,7 +1201,10 @@ mod tests {
     #[test]
     fn test_gpu_mod_square_step254() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Test case: Step 254 value squared
         // This is the special case that causes the bug in _ModInv
@@ -1088,7 +1235,10 @@ mod tests {
     #[test]
     fn test_gpu_reduce512_p_plus_1() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
         let stream = ctx.default_stream();
 
         // Load PTX module
@@ -1160,7 +1310,10 @@ mod tests {
     #[test]
     fn test_gpu_reduce512_p_plus_2() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
         let stream = ctx.default_stream();
 
         // Load PTX module
@@ -1232,7 +1385,10 @@ mod tests {
     #[test]
     fn test_gpu_reduce512_2p() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
         let stream = ctx.default_stream();
 
         // Load PTX module
@@ -1304,7 +1460,10 @@ mod tests {
     #[test]
     fn test_gpu_reduce512_step10() {
         // Initialize GPU
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
         let stream = ctx.default_stream();
 
         // Load PTX module
@@ -1381,7 +1540,10 @@ mod tests {
     fn test_gpu_sequential_basic() {
         use crate::{prefix_to_bits, pubkey_bytes_to_npub, u64x4_to_bytes};
 
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Use prefix "c" (1 char = 5 bits) which has ~1/32 chance of matching
         let prefix = "c";
@@ -1398,6 +1560,7 @@ mod tests {
             &base_key,
             num_threads,
             &prefix_bits,
+            &[],
             max_matches,
             threads_per_block,
         )
@@ -1472,7 +1635,10 @@ mod tests {
         use crate::{prefix_to_bits, pubkey_bytes_to_npub, seckey_to_nsec, u64x4_to_bytes};
         use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
-        let ctx = init_gpu().expect("Failed to initialize GPU");
+        let ctx = match try_init_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
 
         // Use an easy prefix to find matches quickly
         let prefix = "0";
@@ -1488,6 +1654,7 @@ mod tests {
             &base_key,
             num_threads,
             &prefix_bits,
+            &[],
             max_matches,
             threads_per_block,
         )

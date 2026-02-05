@@ -13,9 +13,9 @@ use mocnpub_main::gpu::{
     SequentialTripleBufferMiner, calculate_optimal_batch_size, get_max_keys_per_thread,
     get_sm_count, init_gpu,
 };
-use mocnpub_main::{adjust_privkey_for_endomorphism, prefixes_to_bits};
+use mocnpub_main::{adjust_privkey_for_endomorphism, prefixes_to_bits, suffixes_to_bits};
 use mocnpub_main::{bytes_to_u64x4, pubkey_bytes_to_npub, u64x4_to_bytes};
-use mocnpub_main::{pubkey_to_npub, seckey_to_nsec, validate_prefix};
+use mocnpub_main::{pubkey_to_npub, seckey_to_nsec, validate_prefix, validate_suffix};
 
 /// Nostr npub mining tool 🔑
 #[derive(Parser, Debug)]
@@ -28,15 +28,24 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Mine npub with specified prefix (GPU accelerated 🚀)
+    /// Mine npub with specified prefix/suffix (GPU accelerated 🚀)
     Mine {
         /// Prefix to mine (bech32 string following npub1)
         ///
         /// Single prefix: "abc", "test", "satoshi"
         /// Multiple prefixes (OR): "m0ctane0,m0ctane2,m0ctane3" (comma-separated)
         /// Full npub example: specify "abc" part of npub1abc...
+        /// You can combine with --suffix to require both.
         #[arg(short, long)]
-        prefix: String,
+        prefix: Option<String>,
+
+        /// Suffix to mine (bech32 string at end of npub1... including checksum)
+        ///
+        /// Single suffix: "xyz", "coffee"
+        /// Multiple suffixes (OR): "deadbe,beef00" (comma-separated)
+        /// You can combine with --prefix to require both.
+        #[arg(long)]
+        suffix: Option<String>,
 
         /// Output file (optional, defaults to stdout)
         #[arg(short, long)]
@@ -82,12 +91,23 @@ fn main() -> io::Result<()> {
     match cli.command {
         Commands::Mine {
             prefix,
+            suffix,
             output,
             limit,
             batch_size,
             threads_per_block,
             miners,
-        } => run_mine(prefix, output, limit, batch_size, threads_per_block, miners),
+        } => {
+            run_mine(
+                prefix,
+                suffix,
+                output,
+                limit,
+                batch_size,
+                threads_per_block,
+                miners,
+            )
+        }
         Commands::Verify {
             iterations,
             batch_size,
@@ -98,19 +118,42 @@ fn main() -> io::Result<()> {
 
 /// Run the mine subcommand
 fn run_mine(
-    prefix: String,
+    prefix: Option<String>,
+    suffix: Option<String>,
     output: Option<String>,
     limit: usize,
     batch_size: usize,
     threads_per_block: u32,
     miners: usize,
 ) -> io::Result<()> {
-    // Split prefix by comma and convert to Vec
-    let prefixes: Vec<String> = prefix.split(',').map(|s| s.trim().to_string()).collect();
+    // Split prefix/suffix by comma and convert to Vec
+    let prefixes: Vec<String> = prefix
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let suffixes: Vec<String> = suffix
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
-    // Validate each prefix
+    if prefixes.is_empty() && suffixes.is_empty() {
+        eprintln!("❌ Error: specify --prefix and/or --suffix");
+        std::process::exit(1);
+    }
+
+    // Validate each prefix/suffix
     for p in &prefixes {
         if let Err(err_msg) = validate_prefix(p) {
+            eprintln!("❌ Error: {}", err_msg);
+            std::process::exit(1);
+        }
+    }
+    for s in &suffixes {
+        if let Err(err_msg) = validate_suffix(s) {
             eprintln!("❌ Error: {}", err_msg);
             std::process::exit(1);
         }
@@ -119,10 +162,19 @@ fn run_mine(
     let keys_per_thread = get_max_keys_per_thread();
 
     println!("🔥 mocnpub - Nostr npub mining 🔥");
-    if prefixes.len() == 1 {
-        println!("Prefix: '{}'", prefixes[0]);
-    } else {
-        println!("Prefixes (OR): {}", prefixes.join(", "));
+    if !prefixes.is_empty() {
+        if prefixes.len() == 1 {
+            println!("Prefix: '{}'", prefixes[0]);
+        } else {
+            println!("Prefixes (OR): {}", prefixes.join(", "));
+        }
+    }
+    if !suffixes.is_empty() {
+        if suffixes.len() == 1 {
+            println!("Suffix: '{}'", suffixes[0]);
+        } else {
+            println!("Suffixes (OR): {}", suffixes.join(", "));
+        }
     }
     println!("Batch size: {}", batch_size);
     println!(
@@ -141,6 +193,7 @@ fn run_mine(
 
     mining_loop(
         &prefixes,
+        &suffixes,
         limit,
         batch_size,
         threads_per_block,
@@ -156,9 +209,10 @@ struct MinerMatch {
     gpu_match: mocnpub_main::gpu::GpuMatch,
 }
 
-/// Main mining loop (GPU-side prefix matching with parallel miners)
+/// Main mining loop (GPU-side prefix/suffix matching with parallel miners)
 fn mining_loop(
     prefixes: &[String],
+    suffixes: &[String],
     limit: usize,
     batch_size: usize,
     threads_per_block: u32,
@@ -207,11 +261,13 @@ fn mining_loop(
         batch_size
     };
 
-    // Convert prefixes to bit patterns (pre-computed)
+    // Convert prefix/suffix to bit patterns (pre-computed)
     let prefix_bits = prefixes_to_bits(prefixes);
+    let suffix_bits = suffixes_to_bits(suffixes);
     println!(
-        "📊 Prefix patterns prepared: {} pattern(s)\n",
-        prefix_bits.len()
+        "📊 Prefix patterns prepared: {}, Suffix patterns prepared: {}\n",
+        prefix_bits.len(),
+        suffix_bits.len()
     );
 
     let start = Instant::now();
@@ -242,6 +298,7 @@ fn mining_loop(
     for miner_id in 0..num_miners {
         let ctx = ctx.clone();
         let prefix_bits = prefix_bits.clone();
+        let suffix_bits = suffix_bits.clone();
         let tx = tx.clone();
         let total_count = total_count.clone();
         let stop_flag = stop_flag.clone();
@@ -251,6 +308,7 @@ fn mining_loop(
             let mut miner = match SequentialTripleBufferMiner::new(
                 &ctx,
                 &prefix_bits,
+                &suffix_bits,
                 max_matches,
                 threads_per_block,
                 batch_size,
@@ -372,11 +430,36 @@ fn mining_loop(
                     eprintln!("    Actual npub: {}", npub);
                 }
 
-                let matched_prefix = prefixes
-                    .iter()
-                    .find(|p| npub_body.starts_with(p.as_str()))
-                    .map(|p| p.as_str())
-                    .unwrap_or("?");
+                let matched_prefix = if prefixes.is_empty() {
+                    None
+                } else {
+                    Some(
+                        prefixes
+                            .iter()
+                            .find(|p| npub_body.starts_with(p.as_str()))
+                            .map(|p| p.as_str())
+                            .unwrap_or("?"),
+                    )
+                };
+                let matched_suffix = if suffixes.is_empty() {
+                    None
+                } else {
+                    Some(
+                        suffixes
+                            .iter()
+                            .find(|s| npub_body.ends_with(s.as_str()))
+                            .map(|s| s.as_str())
+                            .unwrap_or("?"),
+                    )
+                };
+
+                let mut matched_lines = String::new();
+                if let Some(mp) = matched_prefix {
+                    matched_lines.push_str(&format!("Matched prefix: '{}'\n", mp));
+                }
+                if let Some(ms) = matched_suffix {
+                    matched_lines.push_str(&format!("Matched suffix: '{}'\n", ms));
+                }
 
                 let current_total = total_count.load(Ordering::Relaxed);
                 let elapsed = start.elapsed();
@@ -385,8 +468,8 @@ fn mining_loop(
 
                 let output_text = format!(
                     "✅ Found #{}! ({} attempts, miner #{})\n\
-                     Matched prefix: '{}'\n\n\
-                     Elapsed: {:.2} sec\n\
+                     {}\
+                     \nElapsed: {:.2} sec\n\
                      Performance: {:.2} keys/sec\n\n\
                      Secret key (hex): {}\n\
                      Secret key (nsec): {}\n\
@@ -397,7 +480,7 @@ fn mining_loop(
                     current_found,
                     current_total,
                     miner_match.miner_id,
-                    matched_prefix,
+                    matched_lines,
                     elapsed_secs,
                     keys_per_sec,
                     sk.display_secret(),
@@ -562,6 +645,7 @@ fn run_verify(iterations: u64, batch_size: usize, miners_opt: Option<usize>) -> 
                 let mut miner = match SequentialTripleBufferMiner::new(
                     &ctx,
                     &prefix_bits,
+                    &[],
                     max_matches,
                     threads_per_block,
                     batch_size,

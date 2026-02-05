@@ -62,20 +62,84 @@
 __constant__ uint64_t _dG_table[192];
 
 // ============================================================================
-// Prefix Matching Constants (set at runtime via cuMemcpyHtoD)
+// Prefix/Suffix Matching Constants (set at runtime via cuMemcpyHtoD)
 // ============================================================================
-// patterns[i] = upper 32 bits of target prefix (after bech32 encoding)
+// patterns[i] = 32-bit prefix matching pattern (upper bits)
 // masks[i] = bitmask for comparison (1s for significant bits)
+// patterns64/masks64 are full 64-bit values for suffix matching.
 // Using constant memory for broadcast optimization (all threads read same values)
 __constant__ uint32_t _patterns[256];
 __constant__ uint32_t _masks[256];
+__constant__ uint64_t _patterns64[256];
+__constant__ uint64_t _masks64[256];
 __constant__ uint32_t _num_prefixes;
+__constant__ uint32_t _num_suffixes;
 __constant__ uint32_t _num_threads;
 __constant__ uint32_t _max_matches;
+#define BECH32_SUFFIX_WINDOW_MASK 0x0FFFFFFFFFFFFFFFULL
+#define BECH32_NPUB_POLYMOD_INIT 0x1773adfbu
 
 // ============================================================================
 // 64-bit Arithmetic Primitives (PTX carry chain)
 // ============================================================================
+
+__device__ __forceinline__ uint32_t _Bech32PolymodStep(uint32_t pre, uint8_t value)
+{
+    uint32_t top = pre >> 25;
+    uint32_t chk = ((pre & 0x1ffffff) << 5) ^ (uint32_t)value;
+    if (top & 1u) chk ^= 0x3b6a57b2u;
+    if (top & 2u) chk ^= 0x26508e6du;
+    if (top & 4u) chk ^= 0x1ea119fau;
+    if (top & 8u) chk ^= 0x3d4233ddu;
+    if (top & 16u) chk ^= 0x2a1462b3u;
+    return chk;
+}
+
+__device__ __forceinline__ uint64_t _Bech32SuffixWindow(const uint64_t* x_coords)
+{
+    uint32_t polymod = BECH32_NPUB_POLYMOD_INIT;
+    uint32_t acc = 0u;
+    uint32_t bits = 0u;
+    uint64_t window = 0ull;
+
+    #pragma unroll
+    for (int limb = 3; limb >= 0; limb--) {
+        uint64_t word = x_coords[limb];
+        #pragma unroll
+        for (int byte = 7; byte >= 0; byte--) {
+            uint8_t b = (uint8_t)((word >> (byte * 8)) & 0xffu);
+            acc = ((acc << 8) | b) & 0x0fffu;
+            bits += 8u;
+            while (bits >= 5u) {
+                bits -= 5u;
+                uint8_t value = (uint8_t)((acc >> bits) & 0x1fu);
+                polymod = _Bech32PolymodStep(polymod, value);
+                window = ((window << 5) | (uint64_t)value) & BECH32_SUFFIX_WINDOW_MASK;
+            }
+        }
+    }
+
+    if (bits > 0u) {
+        uint8_t value = (uint8_t)((acc << (5u - bits)) & 0x1fu);
+        polymod = _Bech32PolymodStep(polymod, value);
+        window = ((window << 5) | (uint64_t)value) & BECH32_SUFFIX_WINDOW_MASK;
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 6; i++) {
+        polymod = _Bech32PolymodStep(polymod, 0u);
+    }
+    uint32_t checksum = polymod ^ 1u;
+
+    #pragma unroll
+    for (int i = 0; i < 6; i++) {
+        uint32_t shift = 5u * (5u - (uint32_t)i);
+        uint8_t value = (uint8_t)((checksum >> shift) & 0x1fu);
+        window = ((window << 5) | (uint64_t)value) & BECH32_SUFFIX_WINDOW_MASK;
+    }
+
+    return window;
+}
 
 /**
  * Add two 64-bit numbers (a + b)
@@ -1357,21 +1421,34 @@ extern "C" __global__ void __launch_bounds__(128, 5) generate_pubkeys_sequential
 
         uint64_t* x_coords[3] = { x, x_beta, x_beta2 };
 
-        // Prefix matching (32-bit for speed, CPU re-verifies with 64-bit)
+        // Prefix/Suffix matching (prefix: 32-bit fast path, suffix: full bech32 window)
         for (uint32_t endo = 0; endo < 3; endo++) {
-            // Extract upper 32 bits of x coordinate for fast matching
-            uint32_t x_upper32 = (uint32_t)(x_coords[endo][3] >> 32);
+            bool prefix_ok = true;
+            bool suffix_ok = true;
 
-            // Optimized path for single prefix (most common case)
-            // Simple 32-bit matching: first prefix inline, rest in loop
-            // When _num_prefixes == 1, the loop condition (1 < 1) is immediately false,
-            // allowing branch prediction to work effectively.
-            bool matched = ((x_upper32 & _masks[0]) == _patterns[0]);
-            for (uint32_t p = 1; p < _num_prefixes; p++) {
-                matched |= ((x_upper32 & _masks[p]) == _patterns[p]);
+            if (_num_prefixes > 0) {
+                // Extract upper 32 bits of x coordinate for fast matching
+                uint32_t x_upper32 = (uint32_t)(x_coords[endo][3] >> 32);
+
+                // Optimized path for single prefix (most common case)
+                // Simple 32-bit matching: first prefix inline, rest in loop
+                // When _num_prefixes == 1, the loop condition (1 < 1) is immediately false,
+                // allowing branch prediction to work effectively.
+                prefix_ok = ((x_upper32 & _masks[0]) == _patterns[0]);
+                for (uint32_t p = 1; p < _num_prefixes; p++) {
+                    prefix_ok |= ((x_upper32 & _masks[p]) == _patterns[p]);
+                }
             }
 
-            if (matched) {
+            if (_num_suffixes > 0) {
+                uint64_t suffix_window = _Bech32SuffixWindow(x_coords[endo]);
+                suffix_ok = ((suffix_window & _masks64[0]) == _patterns64[0]);
+                for (uint32_t p = 1; p < _num_suffixes; p++) {
+                    suffix_ok |= ((suffix_window & _masks64[p]) == _patterns64[p]);
+                }
+            }
+
+            if (prefix_ok && suffix_ok) {
                 uint32_t slot = atomicAdd(match_count, 1);
                 if (slot < _max_matches) {
                     matched_base_idx[slot] = idx;

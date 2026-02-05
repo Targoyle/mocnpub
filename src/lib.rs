@@ -99,6 +99,72 @@ pub fn seckey_to_nsec(seckey: &SecretKey) -> String {
 
 /// bech32 character set (order matters! each character's position corresponds to its 5-bit value)
 const BECH32_CHARSET: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const MAX_AFFIX_LEN: usize = 12;
+const BECH32_SUFFIX_WINDOW_MASK: u64 = (1u64 << 60) - 1;
+const BECH32_NPUB_POLYMOD_INIT: u32 = 0x1773adfb;
+
+fn bech32_polymod_step(pre: u32, value: u8) -> u32 {
+    let top = pre >> 25;
+    let mut chk = ((pre & 0x1ffffff) << 5) ^ (value as u32);
+    if (top & 1) != 0 {
+        chk ^= 0x3b6a57b2;
+    }
+    if (top & 2) != 0 {
+        chk ^= 0x26508e6d;
+    }
+    if (top & 4) != 0 {
+        chk ^= 0x1ea119fa;
+    }
+    if (top & 8) != 0 {
+        chk ^= 0x3d4233dd;
+    }
+    if (top & 16) != 0 {
+        chk ^= 0x2a1462b3;
+    }
+    chk
+}
+
+fn validate_bech32_fragment(fragment: &str, label: &str, label_cap: &str) -> Result<(), String> {
+    if fragment.is_empty() {
+        return Err(format!("{} cannot be empty", label_cap));
+    }
+
+    if fragment.len() > MAX_AFFIX_LEN {
+        return Err(format!(
+            "Invalid {} '{}': length must be <= {} characters",
+            label, fragment, MAX_AFFIX_LEN
+        ));
+    }
+
+    for (i, ch) in fragment.chars().enumerate() {
+        if ch.is_uppercase() {
+            return Err(format!(
+                "Invalid {} '{}': bech32 does not allow uppercase letters (found '{}' at position {})\n\
+                 Hint: Use lowercase instead",
+                label, fragment, ch, i
+            ));
+        }
+
+        if !BECH32_CHARSET.contains(ch) {
+            let hint = match ch {
+                '1' => "Character '1' is not allowed (reserved as separator in bech32)",
+                'b' | 'i' | 'o' => {
+                    "Character is excluded to avoid confusion with similar-looking characters"
+                }
+                _ => "Character is not in the bech32 character set",
+            };
+
+            return Err(format!(
+                "Invalid {} '{}': bech32 does not allow '{}'\n\
+                 {}\n\
+                 Valid characters: {}",
+                label, fragment, ch, hint, BECH32_CHARSET
+            ));
+        }
+    }
+
+    Ok(())
+}
 
 /// Convert prefix to bit array (for fast GPU matching)
 ///
@@ -145,12 +211,84 @@ pub fn prefix_to_bits(prefix: &str) -> (u64, u64, u32) {
     (pattern, mask, bit_len)
 }
 
+/// Convert suffix to bit array (for fast GPU matching)
+///
+/// Convert each bech32 character to 5-bit value and concatenate into lower bits of u64
+pub fn suffix_to_bits(suffix: &str) -> (u64, u64, u32) {
+    let mut pattern: u64 = 0;
+
+    for ch in suffix.chars() {
+        let value = BECH32_CHARSET.find(ch).expect("invalid bech32 char") as u64;
+        pattern = (pattern << 5) | value;
+    }
+
+    let bit_len = (suffix.len() as u32) * 5;
+    let mask = if bit_len >= 64 {
+        u64::MAX
+    } else if bit_len == 0 {
+        0
+    } else {
+        (1u64 << bit_len) - 1
+    };
+
+    (pattern, mask, bit_len)
+}
+
 /// Convert multiple prefixes to bit arrays
 ///
 /// # Returns
 /// * `Vec<(pattern, mask, bit_len)>` - Pattern, mask, and bit length for each prefix
 pub fn prefixes_to_bits(prefixes: &[String]) -> Vec<(u64, u64, u32)> {
     prefixes.iter().map(|p| prefix_to_bits(p)).collect()
+}
+
+/// Convert multiple suffixes to bit arrays
+pub fn suffixes_to_bits(suffixes: &[String]) -> Vec<(u64, u64, u32)> {
+    suffixes.iter().map(|s| suffix_to_bits(s)).collect()
+}
+
+/// Compute the trailing 12 bech32 5-bit values (data + checksum) for suffix matching.
+pub fn bech32_suffix_window_from_bytes(bytes: &[u8; 32]) -> u64 {
+    let mut polymod = BECH32_NPUB_POLYMOD_INIT;
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut window: u64 = 0;
+
+    for &byte in bytes {
+        acc = ((acc << 8) | (byte as u32)) & 0x0fff;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            let value = ((acc >> bits) & 0x1f) as u8;
+            polymod = bech32_polymod_step(polymod, value);
+            window = ((window << 5) | (value as u64)) & BECH32_SUFFIX_WINDOW_MASK;
+        }
+    }
+
+    if bits > 0 {
+        let value = ((acc << (5 - bits)) & 0x1f) as u8;
+        polymod = bech32_polymod_step(polymod, value);
+        window = ((window << 5) | (value as u64)) & BECH32_SUFFIX_WINDOW_MASK;
+    }
+
+    for _ in 0..6 {
+        polymod = bech32_polymod_step(polymod, 0);
+    }
+    let checksum = polymod ^ 1;
+
+    for i in 0..6 {
+        let shift = 5 * (5 - i);
+        let value = ((checksum >> shift) & 0x1f) as u8;
+        window = ((window << 5) | (value as u64)) & BECH32_SUFFIX_WINDOW_MASK;
+    }
+
+    window
+}
+
+/// Compute suffix window directly from pubkey x-coordinate limbs.
+pub fn pubkey_x_to_suffix_window(pubkey_x: &[u64; 4]) -> u64 {
+    let bytes = u64x4_to_bytes(pubkey_x);
+    bech32_suffix_window_from_bytes(&bytes)
 }
 
 // =============================================================================
@@ -415,46 +553,12 @@ fn sub_u64x4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
 /// - Ok(()) : prefix is valid
 /// - Err(String) : error message
 pub fn validate_prefix(prefix: &str) -> Result<(), String> {
-    // Use BECH32_CHARSET for validation (same 32 characters, different order)
-    // BECH32_CHARSET order matters for encoding, but not for contains() check
+    validate_bech32_fragment(prefix, "prefix", "Prefix")
+}
 
-    // Empty string check
-    if prefix.is_empty() {
-        return Err("Prefix cannot be empty".to_string());
-    }
-
-    // Check each character
-    for (i, ch) in prefix.chars().enumerate() {
-        // Check for uppercase
-        if ch.is_uppercase() {
-            return Err(format!(
-                "Invalid prefix '{}': bech32 does not allow uppercase letters (found '{}' at position {})\n\
-                 Hint: Use lowercase instead",
-                prefix, ch, i
-            ));
-        }
-
-        // Check for invalid bech32 characters
-        if !BECH32_CHARSET.contains(ch) {
-            // Add detailed explanation for commonly confused characters
-            let hint = match ch {
-                '1' => "Character '1' is not allowed (reserved as separator in bech32)",
-                'b' | 'i' | 'o' => {
-                    "Character is excluded to avoid confusion with similar-looking characters"
-                }
-                _ => "Character is not in the bech32 character set",
-            };
-
-            return Err(format!(
-                "Invalid prefix '{}': bech32 does not allow '{}'\n\
-                 {}\n\
-                 Valid characters: {}",
-                prefix, ch, hint, BECH32_CHARSET
-            ));
-        }
-    }
-
-    Ok(())
+/// Validate suffix (only allow valid bech32 characters)
+pub fn validate_suffix(suffix: &str) -> Result<(), String> {
+    validate_bech32_fragment(suffix, "suffix", "Suffix")
 }
 
 #[cfg(test)]
@@ -705,6 +809,26 @@ mod tests {
 
         // Should match!
         assert_eq!(pubkey_upper & mask, pattern & mask, "prefix should match");
+    }
+
+    #[test]
+    fn test_suffix_to_bits_matches_npub() {
+        // Consistency test with actual npub
+        let pubkey_bytes: [u8; 32] = [
+            0xC6, 0x04, 0x7F, 0x94, 0x41, 0xED, 0x7D, 0x6D, 0x30, 0x45, 0x40, 0x6E, 0x95,
+            0xC0, 0x7C, 0xD8, 0x5C, 0x77, 0x8E, 0x4B, 0x8C, 0xEF, 0x3C, 0xA7, 0xAB, 0xAC,
+            0x09, 0xB9, 0x5C, 0x70, 0x9E, 0xE5,
+        ];
+
+        let npub = pubkey_bytes_to_npub(&pubkey_bytes);
+        let npub_body = &npub[5..]; // Remove "npub1"
+
+        let suffix = &npub_body[npub_body.len() - 4..];
+        let (pattern, mask, bit_len) = suffix_to_bits(suffix);
+        assert_eq!(bit_len, 20);
+
+        let window = bech32_suffix_window_from_bytes(&pubkey_bytes);
+        assert_eq!(window & mask, pattern & mask, "suffix should match");
     }
 }
 

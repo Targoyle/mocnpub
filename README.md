@@ -7,7 +7,7 @@ Nostr npub vanity address miner with GPU acceleration (CUDA).
 ## Features
 
 - GPU-accelerated mining using CUDA
-- Multiple prefix search (OR matching)
+- Prefix/suffix search (OR matching)
 - Optimized secp256k1 implementation with endomorphism
 - PTX-level optimizations for maximum performance
 - Triple buffering for 100% GPU utilization
@@ -52,19 +52,22 @@ MAX_KEYS_PER_THREAD=2048 cargo build --release
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--prefix <PREFIX>` | Prefix to search for (required) | - |
+| `--prefix <PREFIX>` | Prefix to search for (prefix and/or suffix required) | - |
+| `--suffix <SUFFIX>` | Suffix to search for (prefix and/or suffix required) | - |
 | `--limit <N>` | Number of keys to find (0 = unlimited) | 1 |
 | `--output <FILE>` | Output file (optional) | stdout |
 | `--batch-size <N>` | GPU batch size | 4000000 |
 | `--threads-per-block <N>` | GPU threads per block | 128 |
 | `--miners <N>` | Number of parallel miners | 2 |
 
-### Multiple Prefixes
+### Multiple Prefixes/Suffixes
 
-Search for multiple prefixes at once (OR matching):
+Search for multiple prefixes or suffixes at once (OR matching):
 
 ```bash
 ./target/release/mocnpub-main mine --prefix m0ctane,sakura,n0str
+./target/release/mocnpub-main mine --suffix targ0yle,unyu
+./target/release/mocnpub-main mine --prefix targ --suffix 0yle
 ```
 
 ### Examples
@@ -75,6 +78,12 @@ Search for multiple prefixes at once (OR matching):
 
 # Find an 8-character prefix (~3.5 minutes)
 ./target/release/mocnpub-main mine --prefix m0ctane0
+
+# Find a suffix
+./target/release/mocnpub-main mine --suffix targ0yle
+
+# Find a prefix and suffix
+./target/release/mocnpub-main mine --prefix targ --suffix 0yle
 
 # Find multiple keys
 ./target/release/mocnpub-main mine --prefix m0c --limit 5
@@ -143,6 +152,11 @@ MAX_KEYS_PER_THREAD=800 cargo build --release
 
 For best performance, run the compiled binary on Windows native, not in WSL.
 Build in WSL, then copy to Windows or use `git pull` on Windows.
+If you do run in WSL, you may need to set `LD_LIBRARY_PATH` before execution:
+
+```bash
+LD_LIBRARY_PATH=/usr/lib/wsl/lib:$LD_LIBRARY_PATH ./target/release/mocnpub-main mine --prefix 0000 --suffix 0000
+```
 
 ## Documentation
 
@@ -156,6 +170,7 @@ For detailed information about the development journey:
 ## Built With
 
 This project was developed through pair programming with [Claude Code](https://claude.com/claude-code) 🌸
+Additional functionality was implemented with help from GPT-5.2-Codex. 🌵
 
 ## License
 
