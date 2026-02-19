@@ -169,7 +169,7 @@ For detailed information about the development journey:
 
 ## Built With
 
-This project was developed through pair programming with [Claude Code](https://claude.com/claude-code) 🌸
+This project was developed through pair programming with [Claude Code](https://claude.com/claude-code) 🌸  
 Additional functionality was implemented with help from GPT-5.2-Codex. 🌵
 
 ## License
