@@ -52,19 +52,22 @@ MAX_KEYS_PER_THREAD=2048 cargo build --release
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--prefix <PREFIX>` | Prefix to search for (prefix and/or suffix required) | - |
-| `--suffix <SUFFIX>` | Suffix to search for (prefix and/or suffix required) | - |
+| `--prefix <PREFIX>` | Prefix to search for (repeatable or comma-separated; prefix and/or suffix required) | - |
+| `--suffix <SUFFIX>` | Suffix to search for (repeatable or comma-separated; prefix and/or suffix required) | - |
 | `--limit <N>` | Number of keys to find (0 = unlimited) | 1 |
 | `--output <FILE>` | Output file (optional) | stdout |
 | `--batch-size <N>` | GPU batch size | 4000000 |
 | `--threads-per-block <N>` | GPU threads per block | 128 |
 | `--miners <N>` | Number of parallel miners | 2 |
+| `--progress-interval <N>` | Progress log interval in batches (0 = disable) | 10 |
 
 ### Multiple Prefixes/Suffixes
 
 Search for multiple prefixes or suffixes at once (OR matching):
 
 ```bash
+./target/release/mocnpub-main mine --prefix m0ctane --prefix sakura --prefix n0str
+./target/release/mocnpub-main mine --suffix targ0yle --suffix unyu
 ./target/release/mocnpub-main mine --prefix m0ctane,sakura,n0str
 ./target/release/mocnpub-main mine --suffix targ0yle,unyu
 ./target/release/mocnpub-main mine --prefix targ --suffix 0yle
@@ -90,6 +93,10 @@ Search for multiple prefixes or suffixes at once (OR matching):
 
 # Save to file
 ./target/release/mocnpub-main mine --prefix test --output keys.txt
+
+# Progress log interval (0 = disable)
+./target/release/mocnpub-main mine --prefix m0c --progress-interval 1
+./target/release/mocnpub-main mine --prefix m0c --progress-interval 0
 ```
 
 ## Performance

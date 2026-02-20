@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use secp256k1::rand::{self, RngCore};
 use secp256k1::{Secp256k1, SecretKey};
 use std::fs::OpenOptions;
@@ -33,19 +33,23 @@ enum Commands {
         /// Prefix to mine (bech32 string following npub1)
         ///
         /// Single prefix: "abc", "test", "satoshi"
-        /// Multiple prefixes (OR): "m0ctane0,m0ctane2,m0ctane3" (comma-separated)
+        /// Multiple prefixes (OR):
+        ///   - Repeat: --prefix m0ctane0 --prefix m0ctane2
+        ///   - Comma:  --prefix m0ctane0,m0ctane2
         /// Full npub example: specify "abc" part of npub1abc...
         /// You can combine with --suffix to require both.
-        #[arg(short, long)]
-        prefix: Option<String>,
+        #[arg(short, long, action = ArgAction::Append, value_delimiter = ',')]
+        prefix: Vec<String>,
 
         /// Suffix to mine (bech32 string at end of npub1... including checksum)
         ///
         /// Single suffix: "xyz", "coffee"
-        /// Multiple suffixes (OR): "deadbe,beef00" (comma-separated)
+        /// Multiple suffixes (OR):
+        ///   - Repeat: --suffix deadbe --suffix beef00
+        ///   - Comma:  --suffix deadbe,beef00
         /// You can combine with --prefix to require both.
-        #[arg(long)]
-        suffix: Option<String>,
+        #[arg(long, action = ArgAction::Append, value_delimiter = ',')]
+        suffix: Vec<String>,
 
         /// Output file (optional, defaults to stdout)
         #[arg(short, long)]
@@ -67,6 +71,10 @@ enum Commands {
         /// More miners may improve GPU utilization, like make -j
         #[arg(long, default_value = "2")]
         miners: usize,
+
+        /// Progress log interval in batches (0 = disable)
+        #[arg(long, default_value = "10")]
+        progress_interval: u64,
     },
 
     /// Verify GPU calculations against CPU (fuzzing-like testing)
@@ -97,6 +105,7 @@ fn main() -> io::Result<()> {
             batch_size,
             threads_per_block,
             miners,
+            progress_interval,
         } => {
             run_mine(
                 prefix,
@@ -106,6 +115,7 @@ fn main() -> io::Result<()> {
                 batch_size,
                 threads_per_block,
                 miners,
+                progress_interval,
             )
         }
         Commands::Verify {
@@ -118,24 +128,23 @@ fn main() -> io::Result<()> {
 
 /// Run the mine subcommand
 fn run_mine(
-    prefix: Option<String>,
-    suffix: Option<String>,
+    prefix: Vec<String>,
+    suffix: Vec<String>,
     output: Option<String>,
     limit: usize,
     batch_size: usize,
     threads_per_block: u32,
     miners: usize,
+    progress_interval: u64,
 ) -> io::Result<()> {
     // Split prefix/suffix by comma and convert to Vec
     let prefixes: Vec<String> = prefix
-        .unwrap_or_default()
-        .split(',')
+        .into_iter()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
     let suffixes: Vec<String> = suffix
-        .unwrap_or_default()
-        .split(',')
+        .into_iter()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
@@ -182,6 +191,7 @@ fn run_mine(
         threads_per_block, keys_per_thread
     );
     println!("Parallel miners: {} (× 3 streams each)", miners);
+    println!("Progress interval: {} batches", progress_interval);
     println!(
         "Limit: {}\n",
         if limit == 0 {
@@ -200,6 +210,7 @@ fn run_mine(
         keys_per_thread,
         output.as_deref(),
         miners,
+        progress_interval,
     )
 }
 
@@ -219,6 +230,7 @@ fn mining_loop(
     keys_per_thread: u32,
     output_path: Option<&str>,
     num_miners: usize,
+    progress_interval_batches: u64,
 ) -> io::Result<()> {
     // Initialize GPU
     let ctx = match init_gpu() {
@@ -291,6 +303,11 @@ fn mining_loop(
     let max_matches: u32 = 1000; // generous buffer
     // * 3 for endomorphism: each key generates 3 X-coordinates (P, β*P, β²*P)
     let batch_keys = (batch_size as u64) * (keys_per_thread as u64) * 3;
+    let progress_interval_keys = if progress_interval_batches == 0 {
+        0
+    } else {
+        batch_keys.saturating_mul(progress_interval_batches)
+    };
 
     // Create and launch parallel miners
     let mut handles = Vec::new();
@@ -515,7 +532,9 @@ fn mining_loop(
 
         // Progress display (every ~10 batches worth of keys, regardless of num_miners)
         let current_total = total_count.load(Ordering::Relaxed);
-        if current_total >= last_progress_count + batch_keys * 10 {
+        if progress_interval_keys > 0
+            && current_total >= last_progress_count + progress_interval_keys
+        {
             last_progress_count = current_total;
             let elapsed_secs = start.elapsed().as_secs_f64();
             let keys_per_sec = current_total as f64 / elapsed_secs;
