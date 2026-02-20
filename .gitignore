@@ -10,3 +10,6 @@ profile_report.*
 
 # ncu reports
 *.ncu-rep
+
+# Local agent instructions
+AGENTS.md
